@@ -23,6 +23,20 @@ public final class Coordinator {
     /// for. Deliberately tight: read-back on the measured path is bit-exact, so
     /// anything above float noise is movement, not instrumentation.
     static let repeatedDiscrepancyTolerance = 0.002
+    /// How many ticks a measured actuator bias stays trusted before it has to be
+    /// re-earned by another withheld write. A bias hypothesis explains a ramp of
+    /// exactly that rate perfectly, so an unchallenged one can blind the app to
+    /// real movement; three seconds is short enough that it cannot do so for
+    /// long.
+    static let biasRecheckInterval = 6
+    /// How many consecutive intervals the panel must sit still, with the app
+    /// writing nothing at all, before its stillness is accepted as an actuator
+    /// bias. One interval is not enough: an external ramp that happens to pause
+    /// for half a second looks exactly the same, and half of all ramp episodes
+    /// end that way. Two seconds of genuine stillness is a different claim, and
+    /// a stepped ramp — which is the shape the ambient controller produces —
+    /// cannot fake it.
+    static let probeStillIntervalsRequired = 4
 
     private let brightness: BrightnessControlling
     private var controller = Controller()
@@ -44,6 +58,16 @@ public final class Coordinator {
     /// True on the tick after we deliberately withheld a write in order to see
     /// whether the panel keeps moving on its own. See `tick(luminance:)`.
     private var isProbingActuator = false
+    /// Consecutive intervals the panel has been observed still during the
+    /// current withheld-write probe.
+    private var probeStillIntervals = 0
+    /// Ticks of trust left in `biasEstimate` before another withheld write has
+    /// to confirm it.
+    private var biasTrustRemaining = 0
+    /// How much apparent movement `biasEstimate` has explained away since it was
+    /// last confirmed. If the bias turns out to have been a ramp all along, this
+    /// is exactly the movement it swallowed, and is handed back.
+    private var biasExplained: Double = 0
     /// Learned constant offset between what we write and what the actuator reads
     /// back. Subtracted from every discrepancy, so a lying actuator is measured
     /// once and then compensated instead of being re-absorbed twice a second.
@@ -94,61 +118,101 @@ public final class Coordinator {
             resetExternalTracking()
         } else if let lastWritten {
             let rawDiscrepancy = actual - lastWritten
-            // How far the panel currently sits from where we put it, net of the
-            // actuator's bias: the part of the external movement still visible.
-            let visible = rawDiscrepancy - biasEstimate
             // Movement over the last interval alone. When our own write refreshed
             // the anchor, that is the whole discrepancy less the actuator's known
             // bias; when it did not, the bias is already in the previous reading
-            // and cancels in the difference.
+            // and cancels in the difference — which is why a withheld tick
+            // measures the truth even while a wrong bias is being subtracted.
             let movement = didRefreshAnchor
                 ? rawDiscrepancy - biasEstimate
                 : rawDiscrepancy - lastRawDiscrepancy
             lastRawDiscrepancy = rawDiscrepancy
-            externalMovement += movement
 
-            if abs(externalMovement) > Self.externalChangeThreshold {
-                if isProbingActuator {
-                    // Last tick we withheld the write. Whatever the panel did
-                    // while our hands were off it is the answer.
-                    isProbingActuator = false
-                    if abs(movement) <= Self.repeatedDiscrepancyTolerance {
-                        // It stayed exactly where our last write left it, so
-                        // nothing external is moving: the discrepancy is the
-                        // actuator reading back something other than what it was
-                        // given. Record it once and subtract it from here on,
-                        // rather than folding it into the baseline twice a second
-                        // until the panel hits a rail.
-                        biasEstimate = rawDiscrepancy
-                        externalMovement = 0
-                        lastMovement = nil
-                    } else {
-                        // It kept moving on its own: real. Withholding one write
-                        // delayed the response by half a second and lost none of
-                        // the movement, because it is still there to be measured.
-                        followPanel(actual: actual, visibleDisplacement: visible)
-                        lastMovement = movement
+            if isProbingActuator {
+                // A probe in progress: we are writing nothing at all, which is the
+                // only condition under which movement can be measured rather than
+                // overwritten. It runs until the answer is unambiguous — either
+                // the panel moves, or it holds still for long enough that a ramp
+                // pausing cannot account for it.
+                externalMovement += movement
+                if abs(movement) <= Self.repeatedDiscrepancyTolerance {
+                    probeStillIntervals += 1
+                    guard probeStillIntervals >= Self.probeStillIntervalsRequired else {
+                        didRefreshAnchor = false
+                        return
                     }
-                } else if let previous = lastMovement,
-                          abs(movement) > Self.repeatedDiscrepancyTolerance,
-                          abs(movement - previous) <= Self.repeatedDiscrepancyTolerance {
-                    // The same movement two ticks running. While we write every
-                    // tick our own write re-anchors the panel, so a constant
-                    // read-back bias and a steady external ramp produce *identical*
-                    // readings — no passive statistic can tell them apart. So stop
-                    // writing for exactly one tick and look: a bias stays put, a
-                    // ramp keeps going.
-                    isProbingActuator = true
-                    lastMovement = movement
-                    didRefreshAnchor = false
-                    return
+                    // Still, with our hands off it, for two solid seconds: the
+                    // discrepancy is the actuator reading back something other
+                    // than what it was given. Record it and subtract it, so it
+                    // cannot fold itself into the baseline twice a second until
+                    // the panel hits a rail — but only on trust, which expires
+                    // (see `biasRecheckInterval`).
+                    isProbingActuator = false
+                    probeStillIntervals = 0
+                    biasEstimate = rawDiscrepancy
+                    biasTrustRemaining = Self.biasRecheckInterval
+                    biasExplained = 0
+                    externalMovement = 0
+                    lastMovement = nil
                 } else {
-                    followPanel(actual: actual, visibleDisplacement: visible)
+                    isProbingActuator = false
+                    probeStillIntervals = 0
+                    // It kept moving with our hands off it: real.
+                    if biasEstimate != 0, biasExplained * movement > 0 {
+                        // And it was moving in the direction the "bias" was
+                        // pulling, which means the bias was this same movement
+                        // misread as instrumentation — a ramp that happened to
+                        // pause on the tick we last looked. Everything it
+                        // explained away was real; hand it back.
+                        externalMovement += biasExplained
+                    }
+                    biasEstimate = 0
+                    biasExplained = 0
+                    // With the bias now zero, the whole discrepancy is visible
+                    // external displacement.
+                    followPanel(actual: actual, visibleDisplacement: rawDiscrepancy)
                     lastMovement = movement
                 }
+            } else if biasEstimate != 0, biasTrustRemaining <= 0 {
+                // Trust has run out. A bias of ε and a ramp of ε per tick produce
+                // identical readings, so an unchallenged bias is indistinguishable
+                // from being blind to a ramp at exactly that rate. Withhold a
+                // write and make it prove itself again.
+                isProbingActuator = true
+                probeStillIntervals = 0
+                didRefreshAnchor = false
+                return
             } else {
-                isProbingActuator = false
-                lastMovement = movement
+                externalMovement += movement
+                if didRefreshAnchor, biasEstimate != 0 {
+                    biasExplained += biasEstimate
+                    biasTrustRemaining -= 1
+                }
+
+                if abs(externalMovement) > Self.externalChangeThreshold {
+                    if let previous = lastMovement,
+                       abs(movement) > Self.repeatedDiscrepancyTolerance,
+                       abs(movement - previous) <= Self.repeatedDiscrepancyTolerance {
+                        // The same movement two ticks running. While we write every
+                        // tick our own write re-anchors the panel, so a constant
+                        // read-back bias and a steady external ramp produce
+                        // *identical* readings — no passive statistic can tell them
+                        // apart. So stop writing for exactly one tick and look: a
+                        // bias stays put, a ramp keeps going.
+                        isProbingActuator = true
+                        probeStillIntervals = 0
+                        lastMovement = movement
+                        didRefreshAnchor = false
+                        return
+                    }
+                    followPanel(
+                        actual: actual,
+                        visibleDisplacement: rawDiscrepancy - biasEstimate
+                    )
+                    lastMovement = movement
+                } else {
+                    lastMovement = movement
+                }
             }
         } else {
             baseline = actual - biasEstimate
@@ -205,6 +269,7 @@ public final class Coordinator {
         lastMovement = nil
         lastRawDiscrepancy = 0
         isProbingActuator = false
+        probeStillIntervals = 0
     }
 
     /// Moves the baseline toward `desired`, at most `maxBaselineStepPerTick`.

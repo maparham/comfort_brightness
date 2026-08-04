@@ -203,6 +203,48 @@ func subThresholdRampIsFollowed() {
     #expect(rampTracking(rate: 0.006, from: 0.40, ticks: 40) > 0.9)
 }
 
+/// Runs a ramp whose rate can change from tick to tick, and reports the
+/// fraction of the total external movement the baseline ended up following.
+private func trackedFraction(rates: [Double], from startValue: Double) -> Double {
+    let fake = FakeBrightness(value: startValue)
+    let coordinator = Coordinator(brightness: fake, settings: .defaults)
+    let scene = [0.95, 0.20, 0.55, 0.80, 0.30, 0.50, 0.15, 0.70]
+    let start = coordinator.baseline
+    for (index, rate) in rates.enumerated() {
+        fake.externalChange(to: fake.value + rate)
+        coordinator.tick(luminance: scene[index % scene.count])
+    }
+    return (coordinator.baseline - start) / rates.reduce(0, +)
+}
+
+@Test("A ramp that pauses does not blind the app to the ramp resuming")
+func pausedRampDoesNotTeachAPhantomBias() {
+    // A ramp that happens to stop on the tick the app withheld its write looks
+    // exactly like an actuator bias — the panel is sitting still, a fixed
+    // distance from what we last wrote. Concluding "bias" there records the
+    // *ramp rate* as instrument error, and the app then goes blind to any
+    // further movement at that same rate, because it subtracts it as noise.
+    // Every odd-length ramp used to end this way.
+    for rampLength in [5, 7, 9, 11, 13, 15] {
+        let rates = Array(repeating: 0.012, count: rampLength)
+            + Array(repeating: 0.0, count: 4)
+            + Array(repeating: 0.012, count: 20)
+        #expect(trackedFraction(rates: rates, from: 0.30) > 0.85)
+    }
+}
+
+@Test("A stepped ramp is followed, not fought")
+func steppedRampIsFollowed() {
+    // macOS's ambient controller moves the panel in bursts with pauses between
+    // them rather than at a perfectly even rate, so this shape matters at least
+    // as much as a uniform one.
+    let threeOnOneOff = (0..<40).map { $0 % 4 == 3 ? 0.0 : 0.012 }
+    #expect(trackedFraction(rates: threeOnOneOff, from: 0.30) > 0.85)
+
+    let fiveOnThreeOff = (0..<48).map { $0 % 8 >= 5 ? 0.0 : 0.012 }
+    #expect(trackedFraction(rates: fiveOnThreeOff, from: 0.30) > 0.85)
+}
+
 @Test("A constant read-back bias never walks the baseline, however long it runs")
 func biasIsMeasuredOnceAndThenCompensated() {
     // The counterpart property: the app must be able to follow a ramp without
