@@ -16,6 +16,7 @@
 - Luminance averaging happens in **linear** space; comparison against the neutral point and the applied gain happen in **perceptual** space (`L = L_linear^(1/2.2)`). Getting this backwards makes the app brighten dark-mode content persistently.
 - Measured hardware facts (do not re-derive): brightness read-back is bit-exact with no quantization and no smoothing; the brightness keys step by 1/16 = 0.0625.
 - Defaults: `strength` 0.45, `maxOffset` 0.20, `neutral` 0.50, `deadband` 0.02, slew 0.10/sec (0.05 per 2 Hz tick), `minBrightness` 0.05.
+- **A test run reporting "0 tests" is a failure, not a pass.** `swift test` exits 0 when it selects nothing, so every verification step below states an expected test count — check the count, not just the exit status.
 - No network access anywhere in this project. Screen samples never leave the process and are never written to disk.
 - Commit after every task.
 
@@ -149,7 +150,7 @@ func frameDimensions() {
 
 - [ ] **Step 4: Run the test to verify it fails**
 
-Run: `swift test --filter LuminanceTests`
+Run: `swift test`
 Expected: FAIL — compile error, `cannot find 'Luminance' in scope`.
 
 - [ ] **Step 5: Implement `Frame`**
@@ -204,8 +205,8 @@ public enum Luminance {
 
 - [ ] **Step 7: Run the test to verify it passes**
 
-Run: `swift test --filter LuminanceTests`
-Expected: PASS, 4 tests.
+Run: `swift test`
+Expected: PASS. This task adds 4 tests; the suite total is now 4.
 
 - [ ] **Step 8: Commit**
 
@@ -306,7 +307,7 @@ func cropsVerticalBars() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `swift test --filter LetterboxTests`
+Run: `swift test`
 Expected: FAIL — `cannot find 'Letterbox' in scope`.
 
 - [ ] **Step 3: Implement `Letterbox`**
@@ -380,8 +381,8 @@ public enum Letterbox {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `swift test --filter LetterboxTests`
-Expected: PASS, 6 tests.
+Run: `swift test`
+Expected: PASS. This task adds 6 tests; the suite total is now 10.
 
 - [ ] **Step 5: Commit**
 
@@ -448,12 +449,14 @@ func midGrayIsNeutral() {
 
 @Test("A half-white frame dims substantially")
 func halfWhiteFrame() {
-    // 32 white rows over 32 black rows: p75 saturates at white, the mean sits at
-    // 0.5 linear, so the statistic lands high. Half a screen of glaring white
-    // should dim, and this pins that intent.
+    // 32 white rows over 32 black rows. Note the crop runs first and removes 16
+    // of the 32 black rows (the 25% cap), so the mean is 256/384 = 0.667, not
+    // 0.5. With p75 saturated at white: 0.6 + 0.4*0.667 = 0.867 linear, which is
+    // 0.937 perceptual. Half a screen of glaring white should dim, and this pins
+    // that intent.
     let grays: [UInt8] = Array(repeating: 255, count: 32) + Array(repeating: 0, count: 32)
     let value = LuminanceAnalyzer.analyze(rows(grays, width: 8))
-    #expect(abs(value - 0.90) < 0.03)
+    #expect(abs(value - 0.937) < 0.01)
 }
 
 @Test("A mostly black frame with a small bright region stays dark")
@@ -504,7 +507,7 @@ func percentileRanks() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `swift test --filter LuminanceAnalyzerTests`
+Run: `swift test`
 Expected: FAIL — `cannot find 'LuminanceAnalyzer' in scope`.
 
 - [ ] **Step 3: Implement `LuminanceAnalyzer`**
@@ -574,8 +577,8 @@ public enum LuminanceAnalyzer {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `swift test --filter LuminanceAnalyzerTests`
-Expected: PASS, 7 tests.
+Run: `swift test`
+Expected: PASS. This task adds 7 tests; the suite total is now 17.
 
 - [ ] **Step 5: Commit**
 
@@ -717,7 +720,7 @@ func resetClearsState() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `swift test --filter ControllerTests`
+Run: `swift test`
 Expected: FAIL — `cannot find 'Controller' in scope`.
 
 - [ ] **Step 3: Implement `ControllerSettings` and `Controller`**
@@ -817,8 +820,8 @@ public struct Controller: Sendable {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `swift test --filter ControllerTests`
-Expected: PASS, 9 tests.
+Run: `swift test`
+Expected: PASS. This task adds 9 tests; the suite total is now 26.
 
 - [ ] **Step 5: Commit**
 
@@ -880,7 +883,7 @@ func fakeCanBeUnavailable() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `swift test --filter FakeBrightnessTests`
+Run: `swift test`
 Expected: FAIL — `cannot find 'FakeBrightness' in scope`.
 
 - [ ] **Step 3: Implement the protocol and the fake**
@@ -930,8 +933,8 @@ public final class FakeBrightness: BrightnessControlling {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `swift test --filter FakeBrightnessTests`
-Expected: PASS, 3 tests.
+Run: `swift test`
+Expected: PASS. This task adds 3 tests; the suite total is now 29.
 
 - [ ] **Step 5: Implement the real actuator**
 
@@ -1079,7 +1082,9 @@ git commit -m "feat: brightness actuator protocol and DisplayServices implementa
 
 ### Task 6: Ambient-sensor interaction probe
 
-This task answers a question the spec deliberately left open: whether writing brightness at 2 Hz makes macOS's ambient auto-brightness drift. It runs before the coordinator is finalized because a positive result changes what the app must tell the user.
+This task answers a question the spec deliberately left open: whether writing brightness at 2 Hz makes macOS's ambient auto-brightness drift.
+
+**Its outcome is documentation-only.** No code in Tasks 7–10 changes either way; a positive result adds a warning to the menu (Task 9) and to the README (Task 10), telling the user to turn "Automatically adjust brightness" off. It runs here rather than at the end so the finding is in hand before anyone spends time tuning the control law against a moving baseline.
 
 **Files:**
 - Modify: `Sources/ALSProbe/main.swift`
@@ -1316,7 +1321,7 @@ func unavailableDisplay() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `swift test --filter CoordinatorTests`
+Run: `swift test`
 Expected: FAIL — `cannot find 'Coordinator' in scope`.
 
 - [ ] **Step 3: Implement `Coordinator`**
@@ -1431,8 +1436,8 @@ public final class Coordinator {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `swift test --filter CoordinatorTests`
-Expected: PASS, 9 tests.
+Run: `swift test`
+Expected: PASS. This task adds 9 tests; the suite total is now 26.
 
 - [ ] **Step 5: Run the whole suite**
 

@@ -122,8 +122,13 @@ Steps:
    downscales to a smear that can cover a substantial fraction of a row; a p90 test
    tolerates only 10% bright pixels, while the median tolerates 50% and no subtitle
    spans half a row. The cost is that genuinely dark content rows at the frame edge
-   may be cropped too, which is harmless — they contribute almost nothing to the
-   statistic, and the crop is capped at 25% per edge regardless.
+   may be cropped too, and the crop is capped at 25% per edge regardless.
+
+   Note that this step is not specific to video: it fires on any dark region at a
+   screen edge — a dark dock area, a black sidebar, a dark-themed terminal
+   occupying the bottom of the screen. That is accepted rather than accidental.
+   The effect is a mild center-weighting of the measurement, which is reasonable
+   on its own terms, and the 25% cap bounds how far it can go.
    Without this step a letterboxed film's black bars pull the average down and the
    controller raises brightness, the opposite of the desired behavior.
 3. **Statistic.** `L_linear = 0.6 · p75 + 0.4 · mean` over the cropped region. The
@@ -261,9 +266,10 @@ On quit, brightness is restored to `baseline`.
 - Mid-gray sRGB 128 → `L` ≈ 0.50, and the intermediate linear value ≈ 0.216, not 0.5
   (guards the gamma bug in both directions — averaging must be linear, output must
   be perceptual)
-- A frame that is half white and half black → `L` ≈ 0.90, because the p75 term is
-  saturated by the white half. A screen that is half glaring white should dim
-  substantially; this test pins that intent.
+- A frame that is half white and half black → `L` ≈ 0.94, because the p75 term is
+  saturated by the white half and the crop removes part of the black half. A
+  screen that is half glaring white should dim substantially; this test pins that
+  intent.
 - Letterboxed dark scene: identical content with and without black bars must yield
   `L` within 0.02 of each other (guards the regression that inverts behavior on
   full-screen video)
