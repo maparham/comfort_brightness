@@ -28,9 +28,13 @@ public enum SamplerStatus: Equatable {
 /// The stream is treated as something that *will* break — display sleep and wake,
 /// a monitor plugged in, a resolution change, a TCC grant arriving after launch.
 /// `shouldBeRunning` records the caller's intent, and a maintenance timer keeps
-/// reality matched to it. Without that, a stopped stream simply stops calling
-/// back: the coordinator never ticks again, the last offset is never unwound, and
-/// the panel sits several percent off with the UI still claiming to be running.
+/// reality matched to it. Because opening a stream spans several suspension
+/// points, that intent is re-checked after each one: a user who switches the
+/// app off mid-open must not be left with a live capture nobody is watching.
+///
+/// Without the watchdog, a stopped stream simply stops calling back: the
+/// coordinator never ticks again, the last offset is never unwound, and the
+/// panel sits several percent off with the UI still claiming to be running.
 @MainActor
 public final class ScreenSampler: NSObject {
     /// Capture width in pixels. Height is derived from the display's aspect
@@ -39,10 +43,11 @@ public final class ScreenSampler: NSObject {
     static let captureWidth = 64
     /// How often to check that the stream is alive and, if not, do something.
     static let maintenanceInterval: TimeInterval = 2.0
-    /// Frames arrive at 2 Hz. Four seconds of silence is eight missed frames:
-    /// long enough not to trip on scheduling jitter, short enough that a user
-    /// notices nothing.
-    static let frameTimeout: TimeInterval = 4.0
+    /// Frames arrive at up to 2 Hz, but only while something on screen changes:
+    /// ScreenCaptureKit's cadence on a completely static desktop is its own
+    /// business. Ten seconds of *total* silence — not even an idle frame — is
+    /// long enough to be a genuinely dead stream rather than a quiet screen.
+    static let frameTimeout: TimeInterval = 10.0
 
     private var stream: SCStream?
     private let outputQueue = DispatchQueue(label: "com.mahmoudparham.autobrightness.capture")
@@ -54,6 +59,10 @@ public final class ScreenSampler: NSObject {
     /// quietly brought back by the watchdog.
     private var shouldBeRunning = false
     private var isReconciling = false
+    /// `CGRequestScreenCaptureAccess` prompts once per process and is a no-op
+    /// afterwards. The maintenance timer runs every two seconds, so without this
+    /// the app would keep calling into TCC forever while permission is denied.
+    private var hasRequestedCaptureAccess = false
     private var lastFrameAt: Date?
     private var maintenanceTimer: Timer?
     private var reconfigurationObserver: (any NSObjectProtocol)?
@@ -111,10 +120,13 @@ public final class ScreenSampler: NSObject {
     private func openStream() async {
         guard shouldBeRunning, stream == nil else { return }
         guard CGPreflightScreenCaptureAccess() else {
-            // Asking again is harmless and is what re-surfaces the prompt if the
-            // user dismissed it. The maintenance timer keeps checking, so a grant
-            // made later is picked up without a relaunch when macOS allows it.
-            CGRequestScreenCaptureAccess()
+            // Ask exactly once. The maintenance timer keeps preflighting, so a
+            // grant made later is still picked up without a relaunch when macOS
+            // allows it, but TCC is not poked twice a second in the meantime.
+            if !hasRequestedCaptureAccess {
+                hasRequestedCaptureAccess = true
+                CGRequestScreenCaptureAccess()
+            }
             status = .permissionDenied
             return
         }
@@ -123,6 +135,10 @@ public final class ScreenSampler: NSObject {
                 false,
                 onScreenWindowsOnly: false
             )
+            // The intent can have been withdrawn while that await was in flight:
+            // a user toggling the app off gets no capture, not a stream that
+            // opens a moment later with nobody watching it.
+            guard shouldBeRunning else { return }
             // Built-in only, as specified. Measuring an external monitor's content
             // and aiming the offset at the built-in panel — or worse, at the
             // external's backlight — is not what this app promises to do.
@@ -150,10 +166,20 @@ public final class ScreenSampler: NSObject {
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
             try await stream.startCapture()
+            guard shouldBeRunning else {
+                // Opened against a stale intent: tear it down here, because
+                // `stop()` has already run and found nothing to close. Anything
+                // else leaves the screen-recording indicator lit for good.
+                try? await stream.stopCapture()
+                return
+            }
             self.stream = stream
             lastFrameAt = Date()
-            status = .running
+            // Deliberately *not* `.running` yet. The stream being open says
+            // nothing about frames arriving; the first frame does, and that is
+            // what the rest of the app keys off to start adjusting.
         } catch {
+            guard shouldBeRunning else { return }
             status = .failed(error.localizedDescription)
         }
     }
@@ -169,7 +195,9 @@ public final class ScreenSampler: NSObject {
         guard shouldBeRunning, !isReconciling else { return }
         isReconciling = true
         await closeStream()
-        await openStream()
+        if shouldBeRunning {
+            await openStream()
+        }
         isReconciling = false
     }
 
@@ -227,12 +255,24 @@ public final class ScreenSampler: NSObject {
         }
     }
 
-    fileprivate func handleFrame(_ frame: Frame) {
+    /// Called for *every* frame the stream delivers, whether or not it carried a
+    /// usable measurement.
+    ///
+    /// A frame arriving at all is what proves the stream is alive, so that — not
+    /// the measurement — is what feeds the watchdog and what promotes the status
+    /// to `.running`. On a static screen ScreenCaptureKit reports `.idle`
+    /// frames, which carry no new content; keying the watchdog off those would
+    /// declare a stall on any unchanging desktop and pulse the brightness down
+    /// and back up every few seconds for as long as the user sat still.
+    fileprivate func handleFrameArrival(_ frame: Frame?) {
+        guard shouldBeRunning else { return }
         lastFrameAt = Date()
         if status != .running {
             status = .running
         }
-        onFrame(frame)
+        if let frame {
+            onFrame(frame)
+        }
     }
 
     fileprivate func handleStreamStopped(error: (any Error)?) {
@@ -260,13 +300,13 @@ extension ScreenSampler: SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard type == .screen,
-              sampleBuffer.isValid,
-              Self.isComplete(sampleBuffer),
-              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-              let frame = Self.makeFrame(from: imageBuffer) else { return }
+        guard type == .screen, sampleBuffer.isValid else { return }
+        // Note the arrival unconditionally; measure only what can be measured.
+        let frame: Frame? = Self.isComplete(sampleBuffer)
+            ? CMSampleBufferGetImageBuffer(sampleBuffer).flatMap(Self.makeFrame)
+            : nil
         Task { @MainActor in
-            self.handleFrame(frame)
+            self.handleFrameArrival(frame)
         }
     }
 

@@ -19,6 +19,12 @@ public final class AppModel {
     /// What we last asked the sampler to do, so `applyRunState` does not thrash
     /// it — the sampler reports status changes, which lands us back here.
     private var isSamplingRequested = false
+    /// The last start/stop handed to the sampler. Each new one waits for it, so
+    /// that flipping the toggle twice quickly cannot run the stop before the
+    /// start it was meant to undo — unstructured tasks have no ordering of their
+    /// own, and that ordering is the difference between the capture stopping and
+    /// the screen-recording indicator staying lit indefinitely.
+    private var samplerTask: Task<Void, Never>?
     /// True while a user-requested "pause for 1 hour" is in effect. This is
     /// tracked separately from `Coordinator.isPaused` because system sleep/wake
     /// and the `isEnabled` toggle also drive `Coordinator.suspend()`/`resume()`
@@ -130,6 +136,7 @@ public final class AppModel {
                 self.applyRunState()
             }
         )
+
         applyRunState()
     }
 
@@ -176,7 +183,11 @@ public final class AppModel {
         let shouldSample = userWantsIt && canControlBrightness
         if shouldSample != isSamplingRequested, let sampler {
             isSamplingRequested = shouldSample
-            Task { shouldSample ? await sampler.start() : await sampler.stop() }
+            let previous = samplerTask
+            samplerTask = Task {
+                await previous?.value
+                shouldSample ? await sampler.start() : await sampler.stop()
+            }
         }
 
         if userWantsIt && status == .running {
