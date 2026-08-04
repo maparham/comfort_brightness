@@ -34,17 +34,40 @@ System Settings > Displays, hold the lighting in the room steady, and leave a
 static window on screen. Do not touch the brightness keys while this runs.
 
 Original brightness: \(String(format: "%.4f", original))
-Holding brightness at \(String(format: "%.4f", original)) with 2 Hz writes for 3 minutes.
-If the ambient controller fights us, the observed value will drift away from the
-written value between writes.
+
+Two phases, because one alone cannot answer the question. Holding the panel with
+our own writes and observing no drift proves nothing on its own: it is exactly
+what we would see if our writes were simply overpowering the ambient loop. So the
+probe first watches without writing anything, to learn what the ambient
+controller does when left alone, and only then holds the panel.
 """)
 
-var maxDrift = 0.0
-let ticks = 360  // 3 minutes at 2 Hz
-for tick in 0..<ticks {
+/// Watches the panel for `seconds`, writing nothing.
+func observe(seconds: Int, label: String) -> Double {
+    print("\n--- \(label): \(seconds)s, read-only ---")
+    var maximum = 0.0
+    for tick in 0..<(seconds * 2) {
+        let drift = brightness() - original
+        maximum = max(maximum, abs(drift))
+        if tick % 20 == 0 {
+            print(String(
+                format: "t=%5.1fs  observed=%.4f  drift=%+.4f",
+                Double(tick) / 2.0, original + drift, drift
+            ))
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+    return maximum
+}
+
+let passiveDrift = observe(seconds: 60, label: "Phase 1, passive")
+
+print("\n--- Phase 2, active hold: 180s, writing \(String(format: "%.4f", original)) at 2 Hz ---")
+var activeDrift = 0.0
+for tick in 0..<360 {
     let observed = brightness()
     let drift = observed - original
-    maxDrift = max(maxDrift, abs(drift))
+    activeDrift = max(activeDrift, abs(drift))
     if tick % 20 == 0 {
         print(String(
             format: "t=%5.1fs  observed=%.4f  drift=%+.4f",
@@ -56,7 +79,32 @@ for tick in 0..<ticks {
 }
 
 _ = set(display, Float(original))
-print(String(format: "\nMax drift observed: %.4f", maxDrift))
-print(maxDrift < 0.01
-    ? "RESULT: no meaningful interference. Coexistence holds."
-    : "RESULT: drift detected. The app must tell the user to disable auto-brightness.")
+
+let threshold = 0.01
+print(String(
+    format: "\nMax drift — passive: %.4f, active hold: %.4f (threshold %.2f)",
+    passiveDrift, activeDrift, threshold
+))
+switch (passiveDrift < threshold, activeDrift < threshold) {
+case (true, true):
+    print("""
+    RESULT: inconclusive-but-benign. The ambient controller did not move the panel
+    even when left alone, so the room was too steady for it to act and the active
+    phase proves nothing beyond it. Coexistence is not contradicted. To make this
+    conclusive, rerun and change the room lighting during phase 1 so the ambient
+    loop is visibly active before phase 2 begins.
+    """)
+case (false, true):
+    print("""
+    RESULT: coexistence holds. The ambient controller was demonstrably moving the
+    panel on its own, and the app's writes held it steady without a fight — which
+    is what the offset design needs: our writes win, and any movement the sensor
+    does make is folded into the baseline.
+    """)
+case (_, false):
+    print("""
+    RESULT: interference. The panel drifted away from what we wrote, twice a
+    second, so the two controllers are fighting. The app must tell the user to
+    turn "Automatically adjust brightness" off.
+    """)
+}

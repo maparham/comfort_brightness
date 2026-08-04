@@ -14,14 +14,42 @@ private typealias CDSet = @convention(c) (CGDirectDisplayID, Double) -> Void
 /// linked, so a future macOS that removes them yields `canControl == false`
 /// instead of a launch failure.
 public final class DisplayServicesBrightness: BrightnessControlling {
-    private let displayID: CGDirectDisplayID
+    private var cachedDisplayID: CGDirectDisplayID?
     private let dsGet: DSGet?
     private let dsSet: DSSet?
     private let cdGet: CDGet?
     private let cdSet: CDSet?
 
-    public init(displayID: CGDirectDisplayID = CGMainDisplayID()) {
-        self.displayID = displayID
+    /// The built-in panel, or nil when there isn't one — no built-in display at
+    /// all, or a laptop closed in clamshell mode. The spec is explicit that
+    /// external monitors are never touched, so "no built-in" means "do nothing",
+    /// not "fall back to whatever display is primary".
+    public static func builtinDisplayID() -> CGDirectDisplayID? {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return nil }
+        return ids.prefix(Int(count)).first { CGDisplayIsBuiltin($0) != 0 }
+    }
+
+    /// Re-resolved rather than captured once: a display can come and go while the
+    /// app runs (clamshell open/close, undocking), and the ID is not stable.
+    private var displayID: CGDirectDisplayID? {
+        if let cachedDisplayID,
+           CGDisplayIsActive(cachedDisplayID) != 0,
+           CGDisplayIsBuiltin(cachedDisplayID) != 0 {
+            return cachedDisplayID
+        }
+        cachedDisplayID = Self.builtinDisplayID()
+        return cachedDisplayID
+    }
+
+    public init(displayID: CGDirectDisplayID? = DisplayServicesBrightness.builtinDisplayID()) {
+        self.cachedDisplayID = displayID
+        // Probe against whatever built-in panel exists now; if there is none, the
+        // symbols still resolve and control becomes possible as soon as one
+        // appears.
+        let probeID = displayID ?? CGMainDisplayID()
 
         let displayServices = dlopen(
             "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices",
@@ -35,7 +63,7 @@ public final class DisplayServicesBrightness: BrightnessControlling {
         var canChange = true
         if let symbol = ds("DisplayServicesCanChangeBrightness") {
             let fn = unsafeBitCast(symbol, to: DSCan.self)
-            canChange = fn(displayID) != 0
+            canChange = fn(probeID) != 0
         }
 
         if canChange,
@@ -48,17 +76,19 @@ public final class DisplayServicesBrightness: BrightnessControlling {
             dsSet = nil
         }
 
-        // Fallback path, used only if DisplayServices is unavailable.
-        let coreDisplay = dlopen(
-            "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay",
-            RTLD_LAZY
-        )
-        func cd(_ name: String) -> UnsafeMutableRawPointer? {
-            guard let handle = coreDisplay else { return nil }
-            return dlsym(handle, name)
-        }
-        if let get = cd("CoreDisplay_Display_GetUserBrightness"),
-           let set = cd("CoreDisplay_Display_SetUserBrightness") {
+        // Fallback path, used only if the DisplayServices symbols are missing —
+        // and only when the display has not said outright that its brightness
+        // cannot be changed. Routing around that answer via another framework
+        // would be ignoring the one piece of information the system gave us, and
+        // this path's write/read fidelity has never been measured on real
+        // hardware the way DisplayServices has.
+        if canChange,
+           let coreDisplay = dlopen(
+               "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay",
+               RTLD_LAZY
+           ),
+           let get = dlsym(coreDisplay, "CoreDisplay_Display_GetUserBrightness"),
+           let set = dlsym(coreDisplay, "CoreDisplay_Display_SetUserBrightness") {
             cdGet = unsafeBitCast(get, to: CDGet.self)
             cdSet = unsafeBitCast(set, to: CDSet.self)
         } else {
@@ -68,10 +98,12 @@ public final class DisplayServicesBrightness: BrightnessControlling {
     }
 
     public var canControl: Bool {
-        (dsGet != nil && dsSet != nil) || (cdGet != nil && cdSet != nil)
+        guard displayID != nil else { return false }
+        return (dsGet != nil && dsSet != nil) || (cdGet != nil && cdSet != nil)
     }
 
     public func read() -> Double? {
+        guard let displayID else { return nil }
         if let dsGet {
             var value: Float = 0
             if dsGet(displayID, &value) == 0 {
@@ -85,6 +117,7 @@ public final class DisplayServicesBrightness: BrightnessControlling {
     }
 
     public func write(_ value: Double) {
+        guard let displayID else { return }
         let clamped = min(max(value, 0.0), 1.0)
         if let dsSet {
             _ = dsSet(displayID, Float(clamped))

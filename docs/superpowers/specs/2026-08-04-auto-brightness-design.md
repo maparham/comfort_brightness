@@ -87,7 +87,9 @@ SCStream ──▶ ScreenSampler ──▶ LuminanceAnalyzer ──▶ Controlle
 Owns an `SCStream` over the built-in `SCDisplay`.
 
 - `SCStreamConfiguration`: BGRA, `minimumFrameInterval` = 0.5s (2 fps),
-  `queueDepth` = 1. Capture size is ~64px wide with the **height derived from the
+  `queueDepth` = 3. (This spec originally said 1. That was a bug: the documented
+  valid range is 3–8, and below 3 the stream may deliver no frames at all. Three
+  64×40 buffers cost nothing.) Capture size is ~64px wide with the **height derived from the
   display's aspect ratio** (64×40 for this 2880×1864 panel). A fixed 16:9 size on a
   16:10 panel would make ScreenCaptureKit pad the frame, and the padding bars would
   be indistinguishable from real letterboxing.
@@ -97,7 +99,21 @@ Owns an `SCStream` over the built-in `SCDisplay`.
 - Responsible for permission state: if Screen Recording is denied, it reports that
   upward so the menu bar can surface an actionable message rather than failing
   silently.
-- Restarts the stream on display reconfiguration (resolution change, sleep/wake).
+- Selects the built-in display explicitly (`CGDisplayIsBuiltin`), never simply the
+  main one — with an external monitor set as primary, sampling the main display
+  would measure the wrong screen. No built-in display means `.noDisplay`, not a
+  fallback.
+- Only frames whose `SCStreamFrameInfoStatus` is `.complete` are measured. `.idle`
+  and `.blank` frames carry undefined surface contents, and measuring one reads as
+  a pitch-black screen.
+- Restarts the stream on display reconfiguration (resolution change, sleep/wake)
+  and on `stream(_:didStopWithError:)`, and runs a watchdog that restarts it if no
+  frame arrives for 4 seconds. A stalled stream reports `.stalled` upward, which
+  suspends adjustment: a frozen measurement must never leave an offset applied to
+  the panel with the UI still claiming to be running.
+- Capture stops entirely whenever the app is disabled or paused. The screen is not
+  sampled — and the screen-recording indicator is not lit — while the app is not
+  acting on what it sees.
 
 **Interface:** `start()`, `stop()`, `onFrame: (Frame) -> Void`,
 `onStatus: (SamplerStatus) -> Void`. Depends on ScreenCaptureKit only.
@@ -212,7 +228,14 @@ Implementation resolves symbols via `dlopen`/`dlsym` at startup:
 - Primary: `DisplayServicesGetBrightness` / `DisplayServicesSetBrightness`,
   gated on `DisplayServicesCanChangeBrightness`.
 - Fallback: `CoreDisplay_Display_GetUserBrightness` /
-  `CoreDisplay_Display_SetUserBrightness`.
+  `CoreDisplay_Display_SetUserBrightness` — registered only when the display has
+  *not* said its brightness cannot be changed. Routing around that answer through
+  another framework would ignore the one piece of information the system gave us,
+  and unlike DisplayServices this path's write/read fidelity has never been
+  measured on real hardware.
+- The display ID is the built-in panel's, resolved through `CGDisplayIsBuiltin`
+  and re-resolved as displays come and go. No built-in panel means `canControl` is
+  false: externals are never driven.
 - If neither resolves, the app reports "unsupported on this macOS version" in the
   menu bar and does not attempt any adjustment. This is the expected failure mode
   on a future OS release and must degrade cleanly rather than crash.
@@ -251,6 +274,21 @@ Each 2 Hz tick:
 
 Re-baselining preserves the user's intent exactly: after their adjustment, total
 brightness equals what they set, and the content offset continues to ride on top.
+
+Two guards keep step 2 from turning an instrument error into a runaway:
+
+- **Intent is an event, bias is a constant.** A discrepancy that repeats
+  unchanged tick after tick is not a user; it is an actuator whose read-back does
+  not agree with what it was given. Those are ignored, and the write reference is
+  *held* rather than updated while they are — so a genuine slow drift keeps
+  accumulating against a fixed reference and is picked up within a tick or two,
+  while a fixed bias never grows and never moves the baseline again. Without this,
+  a bias of ε > 0.01 walks the baseline by ε twice a second until the panel hits a
+  rail, in seconds.
+- **A per-tick bound.** The baseline moves at most 0.25 in one tick — far more
+  than any brightness keypress (1/16). A larger jump (a slider dragged across its
+  range) is followed over the next few ticks, and nothing is written while catching
+  up, so the app never yanks the panel back under the user's hand.
 
 Deliberately **not** implemented: a fixed-length lockout after manual adjustment.
 A lockout would produce a visible jump when it expires. Re-baselining is both
@@ -305,6 +343,12 @@ On quit, brightness is restored to `baseline`.
 - Steady input inside the deadband produces zero writes
 - `baseline + offset` never leaves `[0.05, 1.0]`
 - External brightness change re-baselines such that total equals the observed value
+- An actuator whose read-back is systematically off by 0.05, driven with *varying*
+  luminance for 200 ticks, does not walk the baseline (a static scene writes
+  nothing and would pass even with the bug)
+- A slow ambient drift below the per-tick threshold is still picked up
+- A 0.65 external jump moves the baseline at most 0.25 that tick, writes nothing,
+  and converges within a few ticks
 
 **BrightnessActuator** — one integration test, skipped in CI: read, write ±0.05,
 verify the read-back, restore. Marked as requiring a real display.

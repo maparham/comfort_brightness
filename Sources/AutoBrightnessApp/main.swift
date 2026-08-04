@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         self.popover = popover
 
-        Task { await model.start() }
+        model.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

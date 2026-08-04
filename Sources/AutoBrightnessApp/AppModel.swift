@@ -8,10 +8,17 @@ import ServiceManagement
 @MainActor
 @Observable
 public final class AppModel {
+    private let brightness: DisplayServicesBrightness
     private let coordinator: Coordinator
     private var sampler: ScreenSampler?
     private var pauseMonitor: PauseMonitor?
     private var pauseTimer: Timer?
+    /// True while the system has told us adjusting is pointless: display asleep,
+    /// screen locked, machine suspended.
+    private var isSystemPaused = false
+    /// What we last asked the sampler to do, so `applyRunState` does not thrash
+    /// it — the sampler reports status changes, which lands us back here.
+    private var isSamplingRequested = false
     /// True while a user-requested "pause for 1 hour" is in effect. This is
     /// tracked separately from `Coordinator.isPaused` because system sleep/wake
     /// and the `isEnabled` toggle also drive `Coordinator.suspend()`/`resume()`
@@ -23,23 +30,18 @@ public final class AppModel {
     /// `applicationWillTerminate` (logout, Activity Monitor, etc).
     private var hasRestoredBaseline = false
 
-    public var status: SamplerStatus = .idle
+    public private(set) var status: SamplerStatus = .idle
     public private(set) var luminance: Double = 0.5
     public private(set) var offset: Double = 0
     public private(set) var baseline: Double = 0.5
     public private(set) var pausedUntilLabel: String?
-    public let canControlBrightness: Bool
+    public private(set) var canControlBrightness: Bool
 
     public var isEnabled: Bool {
         didSet {
             coordinator.isEnabled = isEnabled
-            // Coordinator.isEnabled's own didSet calls resume() when turning
-            // back on, which would clear a manual pause. Re-assert it.
-            if isEnabled && isManuallyPaused {
-                coordinator.suspend()
-            }
             UserDefaults.standard.set(isEnabled, forKey: "isEnabled")
-            refreshReadouts()
+            applyRunState()
         }
     }
 
@@ -84,6 +86,7 @@ public final class AppModel {
         settings.maxOffset = defaults.double(forKey: "maxOffset")
 
         let brightness = DisplayServicesBrightness()
+        self.brightness = brightness
         canControlBrightness = brightness.canControl
         coordinator = Coordinator(brightness: brightness, settings: settings)
 
@@ -96,24 +99,21 @@ public final class AppModel {
         baseline = coordinator.baseline
     }
 
-    public func start() async {
+    public func start() {
         let monitor = PauseMonitor(
             onSuspend: { [weak self] in
-                self?.coordinator.suspend()
-                self?.refreshReadouts()
+                self?.isSystemPaused = true
+                self?.applyRunState()
             },
             onResume: { [weak self] in
-                // A manual "pause for 1 hour" must outlive a sleep/wake cycle:
-                // only resume automatically if the user didn't ask to be paused.
-                guard let self, !self.isManuallyPaused else { return }
-                self.coordinator.resume()
-                self.refreshReadouts()
+                self?.isSystemPaused = false
+                self?.applyRunState()
             }
         )
         monitor.start()
         pauseMonitor = monitor
 
-        let sampler = ScreenSampler(
+        sampler = ScreenSampler(
             onFrame: { [weak self] frame in
                 guard let self else { return }
                 let value = LuminanceAnalyzer.analyze(frame)
@@ -121,17 +121,28 @@ public final class AppModel {
                 self.refreshReadouts()
             },
             onStatus: { [weak self] status in
-                self?.status = status
+                guard let self else { return }
+                self.status = status
+                // A stream that has stopped or stalled delivers no more ticks, so
+                // the offset it left behind would never be unwound. Treat it like
+                // any other pause: hand the panel back to the user's baseline
+                // until frames are flowing again.
+                self.applyRunState()
             }
         )
-        self.sampler = sampler
-        await sampler.start()
+        applyRunState()
+    }
+
+    /// Re-attempts capture, for the case where the user has just granted Screen
+    /// Recording permission.
+    public func retrySampling() {
+        guard let sampler else { return }
+        Task { await sampler.retry() }
     }
 
     /// Stops adjusting for an hour, then resumes on its own.
     public func pauseForAnHour() {
         isManuallyPaused = true
-        coordinator.suspend()
         pausedUntilLabel = Self.timeFormatter.string(
             from: Date().addingTimeInterval(3600)
         )
@@ -141,7 +152,7 @@ public final class AppModel {
                 self?.endPause()
             }
         }
-        refreshReadouts()
+        applyRunState()
     }
 
     public func endPause() {
@@ -149,7 +160,32 @@ public final class AppModel {
         pauseTimer?.invalidate()
         pauseTimer = nil
         pausedUntilLabel = nil
-        coordinator.resume()
+        applyRunState()
+    }
+
+    /// The single place that decides whether the app is watching the screen and
+    /// whether it is adjusting. Every input — the toggle, a manual pause, system
+    /// sleep, sampler health — funnels through here, so the two can never
+    /// disagree (capturing while disabled, or adjusting on a frozen measurement).
+    private func applyRunState() {
+        canControlBrightness = brightness.canControl
+        let userWantsIt = isEnabled && !isManuallyPaused && !isSystemPaused
+
+        // Capture only while the app would actually act on a frame. A user who
+        // turns this off expects the screen-recording indicator to go out.
+        let shouldSample = userWantsIt && canControlBrightness
+        if shouldSample != isSamplingRequested, let sampler {
+            isSamplingRequested = shouldSample
+            Task { shouldSample ? await sampler.start() : await sampler.stop() }
+        }
+
+        if userWantsIt && status == .running {
+            if coordinator.isPaused {
+                coordinator.resume()
+            }
+        } else {
+            coordinator.suspend()
+        }
         refreshReadouts()
     }
 

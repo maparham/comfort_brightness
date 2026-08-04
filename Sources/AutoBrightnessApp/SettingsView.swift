@@ -42,17 +42,18 @@ public struct SettingsView: View {
 
             Divider()
 
-            if model.isEnabled {
-                if let label = model.pausedUntilLabel {
-                    HStack {
-                        Text("Paused until \(label)")
-                            .font(.caption)
-                        Spacer()
-                        Button("Resume", action: model.endPause)
-                    }
-                } else {
-                    Button("Pause for 1 hour", action: model.pauseForAnHour)
+            // Shown whether or not the app is enabled: a user who pauses and then
+            // switches the toggle off must still be able to see that a pause is
+            // in effect, and cancel it.
+            if let label = model.pausedUntilLabel {
+                HStack {
+                    Text("Paused until \(label)")
+                        .font(.caption)
+                    Spacer()
+                    Button("Resume", action: model.endPause)
                 }
+            } else if model.isEnabled {
+                Button("Pause for 1 hour", action: model.pauseForAnHour)
             }
 
             Toggle("Open at login", isOn: $model.launchAtLogin)
@@ -82,7 +83,13 @@ public struct SettingsView: View {
         case .running:
             EmptyView()
         case .idle:
-            Text("Starting…").font(.caption).foregroundStyle(.secondary)
+            Text(model.isEnabled ? "Starting…" : "Not watching the screen.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .stalled:
+            Text("Reconnecting to the display…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .permissionDenied:
             VStack(alignment: .leading, spacing: 4) {
                 Label(
@@ -91,16 +98,27 @@ public struct SettingsView: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.orange)
-                Button("Open System Settings") {
-                    let url = URL(
-                        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-                    )!
-                    NSWorkspace.shared.open(url)
+                HStack {
+                    Button("Open System Settings") {
+                        let url = URL(
+                            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                        )!
+                        NSWorkspace.shared.open(url)
+                    }
+                    Button("Try Again", action: model.retrySampling)
                 }
                 .font(.caption)
+                // macOS usually only honours a screen-capture grant for a process
+                // that started after it, so say so rather than leaving the user
+                // pressing a button that cannot work.
+                Text("After granting permission, quit and reopen Auto Brightness if it does not start on its own.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         case .noDisplay:
-            Text("No built-in display found.").font(.caption).foregroundStyle(.orange)
+            Text("No built-in display found. Auto Brightness only adjusts the built-in panel.")
+                .font(.caption)
+                .foregroundStyle(.orange)
         case .failed(let message):
             Text("Capture failed: \(message)").font(.caption).foregroundStyle(.orange)
         }
