@@ -239,7 +239,11 @@ public final class Coordinator {
         // the session. Forgetting it would make the app re-learn — and re-absorb
         // — the same bias after every sleep/wake.
         if let actual = brightness.read() {
-            baseline = actual
+            // Read in the actuator's terms, stored in the terms we write in —
+            // the same conversion the first tick after a reset applies. Without
+            // it, every suspend/resume cycle would re-import the bias into the
+            // baseline it was just removed from.
+            baseline = actual - biasEstimate
         }
     }
 

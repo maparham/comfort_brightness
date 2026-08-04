@@ -227,6 +227,37 @@ func biasIsMeasuredOnceAndThenCompensated() {
     }
 }
 
+@Test("Restoring and resuming on a biased actuator does not drift")
+func biasSurvivesSuspendResumeWithoutDrift() {
+    // A bias means the app can never place the panel exactly: nothing in the
+    // read-back distinguishes "the actuator reports 0.05 more than the panel
+    // shows" from "the panel really does land 0.05 above what it was told", and
+    // the two want opposite corrections. What must hold is that the residual is
+    // a one-time offset rather than something each pause, wake or disable adds
+    // to again.
+    let fake = LyingBrightness(value: 0.60, bias: 0.05)
+    let coordinator = Coordinator(brightness: fake, settings: .defaults)
+    let scene = [0.95, 0.20, 0.55, 0.80, 0.30, 0.50, 0.15, 0.70]
+    for index in 0..<40 {
+        coordinator.tick(luminance: scene[index % scene.count])
+    }
+    coordinator.isEnabled = false
+    let restored = fake.read() ?? 0
+    #expect(abs(restored - 0.60) <= 3 * 0.05 + 1e-9)
+
+    coordinator.isEnabled = true
+    for cycle in 0..<10 {
+        coordinator.suspend()
+        coordinator.resume()
+        for index in 0..<20 {
+            coordinator.tick(luminance: scene[(cycle + index) % scene.count])
+        }
+    }
+    coordinator.isEnabled = false
+    // Ten pause/resume cycles later, exactly the same place.
+    #expect(abs((fake.read() ?? 0) - restored) < 1e-9)
+}
+
 @Test("A large external jump is followed over several ticks without fighting it")
 func largeJumpIsFollowedGradually() {
     let fake = FakeBrightness(value: 0.30)
