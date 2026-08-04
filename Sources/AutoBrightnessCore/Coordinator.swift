@@ -18,13 +18,36 @@ public final class Coordinator {
     /// (a slider dragged across its range) is followed over the next few ticks
     /// instead of in one leap, and nothing is written while catching up.
     static let maxBaselineStepPerTick = 0.25
+    /// How close two consecutive discrepancies must be to count as "the same
+    /// discrepancy again", which is what makes an actuator bias worth testing
+    /// for. Deliberately tight: read-back on the measured path is bit-exact, so
+    /// anything above float noise is movement, not instrumentation.
+    static let repeatedDiscrepancyTolerance = 0.002
 
     private let brightness: BrightnessControlling
     private var controller = Controller()
     private var lastWritten: Double?
-    /// The previous tick's hardware-versus-last-write discrepancy, used to tell a
-    /// user action from an actuator that simply reads back what it was not given.
-    private var lastDiscrepancy: Double?
+    /// The previous tick's raw hardware-versus-last-write discrepancy. Kept so
+    /// that a tick on which nothing was written still yields the movement over
+    /// that one interval rather than the total since the last write.
+    private var lastRawDiscrepancy: Double = 0
+    /// True when `lastWritten` was refreshed on the previous tick, i.e. the
+    /// discrepancy measured now covers exactly one tick.
+    private var didRefreshAnchor = false
+    /// Unexplained movement since the baseline last followed the panel. Summing
+    /// it is what lets a drift too slow to clear `externalChangeThreshold` on any
+    /// single tick still be followed, instead of being overwritten each tick.
+    private var externalMovement: Double = 0
+    /// The previous tick's one-interval movement, used only to notice that the
+    /// same movement is repeating and is therefore worth testing.
+    private var lastMovement: Double?
+    /// True on the tick after we deliberately withheld a write in order to see
+    /// whether the panel keeps moving on its own. See `tick(luminance:)`.
+    private var isProbingActuator = false
+    /// Learned constant offset between what we write and what the actuator reads
+    /// back. Subtracted from every discrepancy, so a lying actuator is measured
+    /// once and then compensated instead of being re-absorbed twice a second.
+    private var biasEstimate: Double = 0
     /// True while the baseline is still stepping toward a large external move.
     private var isCatchingUp = false
 
@@ -67,35 +90,69 @@ public final class Coordinator {
         if isCatchingUp {
             // Still closing a gap opened by a large external move. Keep stepping
             // toward it and keep quiet until we arrive.
-            isCatchingUp = moveBaseline(toward: actual - controller.appliedOffset)
-            lastDiscrepancy = nil
+            isCatchingUp = moveBaseline(toward: actual - biasEstimate - controller.appliedOffset)
+            resetExternalTracking()
         } else if let lastWritten {
-            let discrepancy = actual - lastWritten
-            if abs(discrepancy) > Self.externalChangeThreshold {
-                // Distinguish intent from instrumentation. A user action is an
-                // event: it appears once and the next read agrees with what we
-                // then wrote. An actuator whose read-back is systematically off
-                // by some fixed amount produces the *same* discrepancy on every
-                // tick, forever. Re-baselining on that would walk the baseline by
-                // that amount twice a second until the panel hits a rail.
-                //
-                // Holding `lastWritten` while we ignore it is what keeps this
-                // safe: a genuine slow drift keeps accumulating against a frozen
-                // reference and crosses back out of "unchanged" within a tick or
-                // two, whereas a fixed read-back bias never grows.
-                let isStatic = lastDiscrepancy.map {
-                    abs(discrepancy - $0) <= Self.externalChangeThreshold
-                } ?? false
-                if !isStatic {
-                    isCatchingUp = moveBaseline(toward: actual - controller.appliedOffset)
+            let rawDiscrepancy = actual - lastWritten
+            // How far the panel currently sits from where we put it, net of the
+            // actuator's bias: the part of the external movement still visible.
+            let visible = rawDiscrepancy - biasEstimate
+            // Movement over the last interval alone. When our own write refreshed
+            // the anchor, that is the whole discrepancy less the actuator's known
+            // bias; when it did not, the bias is already in the previous reading
+            // and cancels in the difference.
+            let movement = didRefreshAnchor
+                ? rawDiscrepancy - biasEstimate
+                : rawDiscrepancy - lastRawDiscrepancy
+            lastRawDiscrepancy = rawDiscrepancy
+            externalMovement += movement
+
+            if abs(externalMovement) > Self.externalChangeThreshold {
+                if isProbingActuator {
+                    // Last tick we withheld the write. Whatever the panel did
+                    // while our hands were off it is the answer.
+                    isProbingActuator = false
+                    if abs(movement) <= Self.repeatedDiscrepancyTolerance {
+                        // It stayed exactly where our last write left it, so
+                        // nothing external is moving: the discrepancy is the
+                        // actuator reading back something other than what it was
+                        // given. Record it once and subtract it from here on,
+                        // rather than folding it into the baseline twice a second
+                        // until the panel hits a rail.
+                        biasEstimate = rawDiscrepancy
+                        externalMovement = 0
+                        lastMovement = nil
+                    } else {
+                        // It kept moving on its own: real. Withholding one write
+                        // delayed the response by half a second and lost none of
+                        // the movement, because it is still there to be measured.
+                        followPanel(actual: actual, visibleDisplacement: visible)
+                        lastMovement = movement
+                    }
+                } else if let previous = lastMovement,
+                          abs(movement) > Self.repeatedDiscrepancyTolerance,
+                          abs(movement - previous) <= Self.repeatedDiscrepancyTolerance {
+                    // The same movement two ticks running. While we write every
+                    // tick our own write re-anchors the panel, so a constant
+                    // read-back bias and a steady external ramp produce *identical*
+                    // readings — no passive statistic can tell them apart. So stop
+                    // writing for exactly one tick and look: a bias stays put, a
+                    // ramp keeps going.
+                    isProbingActuator = true
+                    lastMovement = movement
+                    didRefreshAnchor = false
+                    return
+                } else {
+                    followPanel(actual: actual, visibleDisplacement: visible)
+                    lastMovement = movement
                 }
-                lastDiscrepancy = discrepancy
             } else {
-                lastDiscrepancy = nil
+                isProbingActuator = false
+                lastMovement = movement
             }
         } else {
-            baseline = actual
-            lastDiscrepancy = nil
+            baseline = actual - biasEstimate
+            resetExternalTracking()
         }
 
         let target = controller.update(
@@ -108,6 +165,8 @@ public final class Coordinator {
         // so catching up never turns into fighting them.
         if isCatchingUp {
             lastWritten = actual
+            lastRawDiscrepancy = 0
+            didRefreshAnchor = true
             return
         }
         // Compare against `actual` when nothing has been written yet, so a scene
@@ -115,7 +174,37 @@ public final class Coordinator {
         if abs(target - (lastWritten ?? actual)) >= Self.minimumWriteDelta {
             brightness.write(target)
             lastWritten = target
+            lastRawDiscrepancy = 0
+            didRefreshAnchor = true
+        } else {
+            didRefreshAnchor = false
         }
+    }
+
+    /// Takes the panel's current level as the user's intent, net of the offset we
+    /// put there ourselves and of the actuator's measured bias.
+    ///
+    /// Movement slow enough to stay under `externalChangeThreshold` on a single
+    /// tick is physically erased by our own next write, so the panel no longer
+    /// shows it. `externalMovement` remembers it; adding back the part that is no
+    /// longer visible is what makes a slow ambient ramp followed in full rather
+    /// than a third at a time. When nothing was erased this reduces exactly to
+    /// "the panel's level, less our offset".
+    private func followPanel(actual: Double, visibleDisplacement: Double) {
+        let erased = externalMovement - visibleDisplacement
+        isCatchingUp = moveBaseline(
+            toward: actual - biasEstimate - controller.appliedOffset + erased
+        )
+        externalMovement = 0
+    }
+
+    /// Forgets everything about external movement. Used wherever the anchor is
+    /// about to be re-established from scratch.
+    private func resetExternalTracking() {
+        externalMovement = 0
+        lastMovement = nil
+        lastRawDiscrepancy = 0
+        isProbingActuator = false
     }
 
     /// Moves the baseline toward `desired`, at most `maxBaselineStepPerTick`.
@@ -143,8 +232,12 @@ public final class Coordinator {
         isPaused = false
         controller.reset()
         lastWritten = nil
-        lastDiscrepancy = nil
+        resetExternalTracking()
+        didRefreshAnchor = false
         isCatchingUp = false
+        // `biasEstimate` deliberately survives: it describes the actuator, not
+        // the session. Forgetting it would make the app re-learn — and re-absorb
+        // — the same bias after every sleep/wake.
         if let actual = brightness.read() {
             baseline = actual
         }
@@ -157,7 +250,8 @@ public final class Coordinator {
             brightness.write(baseline)
         }
         lastWritten = nil
-        lastDiscrepancy = nil
+        resetExternalTracking()
+        didRefreshAnchor = false
         isCatchingUp = false
         controller.reset()
     }

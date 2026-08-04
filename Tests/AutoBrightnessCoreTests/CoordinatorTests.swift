@@ -165,23 +165,66 @@ func negativeBiasDoesNotWalkBaseline() {
     #expect((fake.read() ?? 0) > 0.35)
 }
 
-@Test("A genuine slow drift is still followed despite the bias guard")
-func slowDriftStillRebaselines() {
-    // The ambient sensor easing the panel down: 0.008 per tick, below the
-    // detection threshold on any single tick. Because the reference is held
-    // while a discrepancy looks static, the drift accumulates against it and is
-    // picked up rather than ignored forever.
-    let fake = FakeBrightness(value: 0.60)
+/// Drives an external ramp the way an ambient sensor or a held brightness key
+/// actually behaves: it nudges whatever the panel currently shows, on top of
+/// whatever we last wrote. Driving it to an absolute level instead would erase
+/// our write, which is a different — and much easier — situation to track.
+private func rampTracking(rate: Double, from startValue: Double, ticks: Int) -> Double {
+    let fake = FakeBrightness(value: startValue)
     let coordinator = Coordinator(brightness: fake, settings: .defaults)
-    coordinator.tick(luminance: 0.50)
-    var level = 0.60
-    for _ in 0..<20 {
-        level -= 0.008
-        fake.externalChange(to: level)
-        coordinator.tick(luminance: 0.50)
+    // The luminance has to vary: a static scene writes nothing, so the app never
+    // touches the panel and any tracking assertion would pass vacuously.
+    let scene = [0.95, 0.20, 0.55, 0.80, 0.30, 0.50, 0.15, 0.70]
+    let start = coordinator.baseline
+    for index in 0..<ticks {
+        fake.externalChange(to: fake.value + rate)
+        coordinator.tick(luminance: scene[index % scene.count])
     }
-    // Mid-gray means zero offset, so the baseline should have followed the panel.
-    #expect(abs(coordinator.baseline - level) < 0.02)
+    return (coordinator.baseline - start) / (Double(ticks) * rate)
+}
+
+@Test("A smooth external ramp is followed rather than fought")
+func smoothExternalRampIsFollowed() {
+    // The ambient controller easing the panel up and down at 0.012 per tick —
+    // 1.4% of range per second. Every bit of that movement is the user's or the
+    // sensor's intent, and the whole offset design rests on it becoming the new
+    // baseline instead of being written back down.
+    #expect(rampTracking(rate: 0.012, from: 0.30, ticks: 40) > 0.9)
+    #expect(rampTracking(rate: -0.012, from: 0.80, ticks: 40) > 0.9)
+    #expect(rampTracking(rate: 0.020, from: 0.20, ticks: 30) > 0.9)
+}
+
+@Test("A ramp too slow to register on any single tick is still followed")
+func subThresholdRampIsFollowed() {
+    // 0.006 per tick never clears `externalChangeThreshold` on its own, and our
+    // own next write physically erases it from the panel. Only the accumulated
+    // movement makes it followable at all.
+    #expect(0.006 < Coordinator.externalChangeThreshold)
+    #expect(rampTracking(rate: 0.006, from: 0.40, ticks: 40) > 0.9)
+}
+
+@Test("A constant read-back bias never walks the baseline, however long it runs")
+func biasIsMeasuredOnceAndThenCompensated() {
+    // The counterpart property: the app must be able to follow a ramp without
+    // that making a systematically lying actuator able to march the baseline to
+    // a rail. A bias is absorbed at most a couple of times, then measured and
+    // subtracted — so running ten times longer must not move the baseline any
+    // further than running briefly.
+    func settledBaseline(bias: Double, ticks: Int) -> Double {
+        let fake = LyingBrightness(value: 0.60, bias: bias)
+        let coordinator = Coordinator(brightness: fake, settings: .defaults)
+        let scene = [0.95, 0.20, 0.55, 0.80, 0.30, 0.50, 0.15, 0.70]
+        for index in 0..<ticks {
+            coordinator.tick(luminance: scene[index % scene.count])
+        }
+        return coordinator.baseline
+    }
+    for bias in [0.05, -0.05, 0.02] {
+        let short = settledBaseline(bias: bias, ticks: 40)
+        let long = settledBaseline(bias: bias, ticks: 600)
+        #expect(abs(long - short) < 1e-9)
+        #expect(abs(long - 0.60) <= 3 * abs(bias))
+    }
 }
 
 @Test("A large external jump is followed over several ticks without fighting it")
