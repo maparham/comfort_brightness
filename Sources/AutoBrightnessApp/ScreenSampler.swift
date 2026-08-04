@@ -41,6 +41,7 @@ public final class ScreenSampler: NSObject {
     }
 
     public func start() async {
+        guard stream == nil else { return }
         guard CGPreflightScreenCaptureAccess() else {
             CGRequestScreenCaptureAccess()
             onStatus(.permissionDenied)
