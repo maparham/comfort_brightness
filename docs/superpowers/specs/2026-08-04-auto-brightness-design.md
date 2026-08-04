@@ -23,8 +23,19 @@ whatever brightness the user (or the ambient sensor) has already chosen.
 | App shape | Menu-bar app with optional debug panel |
 | App Store distribution | Not a goal |
 
-macOS "Automatically adjust brightness" may remain enabled. The offset design
-coexists with it rather than fighting it (see Baseline Tracking).
+macOS "Automatically adjust brightness" is expected to remain enabled; the offset
+design treats its movements as user intent rather than as error (see Baseline
+Tracking).
+
+This coexistence is a design intent, not yet a verified fact. macOS shifts its
+learned ambient-light curve in response to manual brightness changes, and it may
+interpret this app's 2 Hz writes the same way — in which case the two controllers
+would slowly adapt to each other and the baseline would drift. **The implementation
+plan must verify this early**, before the control law is tuned: with ambient
+auto-brightness on, hold a static white page under steady lighting for several
+minutes and watch whether the baseline walks. If it does, the app detects that the
+setting is enabled and asks the user to turn it off, rather than claiming a
+coexistence it does not have.
 
 ### Feasibility, verified
 
@@ -38,6 +49,16 @@ On this machine (macOS 26.5, arm64) the following symbols resolve:
 
 `DisplayServicesBrightnessChanged` is absent, so change detection uses polling
 rather than a notification callback.
+
+Measured on this machine by writing values and reading them back:
+
+- **No quantization.** A sweep of 0.30→0.70 in 0.01 steps read back bit-exact every
+  time. The re-baseline detector's 0.01 threshold is therefore safe.
+- **No read-back smoothing.** `DisplayServicesGetBrightness` returns the written
+  value immediately (checked at 50ms intervals), so the detector never has to wait
+  for a settled reading.
+- The brightness keys step by 1/16 (0.0625), well above the detection threshold,
+  so manual adjustment is unambiguous.
 
 ## Architecture
 
@@ -57,8 +78,11 @@ SCStream ──▶ ScreenSampler ──▶ LuminanceAnalyzer ──▶ Controlle
 
 Owns an `SCStream` over the built-in `SCDisplay`.
 
-- `SCStreamConfiguration`: 64×36, BGRA, `minimumFrameInterval` = 0.5s (2 fps),
-  `queueDepth` = 1.
+- `SCStreamConfiguration`: BGRA, `minimumFrameInterval` = 0.5s (2 fps),
+  `queueDepth` = 1. Capture size is ~64px wide with the **height derived from the
+  display's aspect ratio** (64×40 for this 2880×1864 panel). A fixed 16:9 size on a
+  16:10 panel would make ScreenCaptureKit pad the frame, and the padding bars would
+  be indistinguishable from real letterboxing.
 - The compositor performs the downscale on the GPU; per-frame CPU work is ~2300
   pixels, which is negligible.
 - Emits `Frame(width, height, pixels: [UInt8])` to the analyzer.
@@ -80,14 +104,28 @@ Steps:
    ((c+0.055)/1.055)^2.4`), then combined with Rec. 709 weights
    (`0.2126 R + 0.7152 G + 0.0722 B`). Averaging gamma-encoded values is the
    common error here and materially misjudges dark content.
-2. **Letterbox crop.** Scan inward from each edge, dropping whole rows/columns whose
-   pixels are uniformly below linear luminance 0.02. Stop at the first
-   non-conforming row/column, and never crop more than 25% from any edge.
+2. **Letterbox crop.** Scan inward from each edge, dropping rows/columns whose
+   **90th-percentile** luminance is below 0.02. Stop at the first non-conforming
+   row/column, and never crop more than 25% from any edge.
+   A strict "every pixel below threshold" test would be defeated by a single
+   subtitle glyph sitting in the lower bar: the crop would stop, `L` would drop, and
+   the app would brighten — intermittently, for the duration of every subtitle. The
+   percentile test tolerates sparse bright pixels in an otherwise black row.
    Without this step a letterboxed film's black bars pull the average down and the
-   controller *raises* brightness — the opposite of the desired behavior.
-3. **Statistic.** `L = 0.6 · p75 + 0.4 · mean` over the cropped region. The 75th
-   percentile represents the content the user is actually looking at; the mean
+   controller raises brightness, the opposite of the desired behavior.
+3. **Statistic.** `L_linear = 0.6 · p75 + 0.4 · mean` over the cropped region. The
+   75th percentile represents the content the user is actually looking at; the mean
    prevents a small bright region from dominating.
+4. **Back to perceptual.** `L = L_linear^(1/2.2)`, yielding a value on roughly the
+   same perceptual scale as macOS's own brightness setting.
+
+Steps 1 and 4 are not redundant. Averaging must happen in linear space to be
+physically meaningful, but the *comparison* against a neutral point and the gain
+applied to the error must happen in perceptual space — otherwise the neutral point
+lands in the wrong place. Linear 0.35 corresponds to sRGB 0.63, a fairly light gray,
+which would make the app brighten the screen for ordinary mid-gray content and
+brighten a dark-mode editor substantially. A dark IDE is not a dark video, and it
+should not be treated as one.
 
 **Depends on:** nothing. Input is a pixel buffer, output is a number.
 
@@ -99,14 +137,22 @@ called at 2 Hz.
 1. **Transient rejection.** Use the median of the last 3 samples (1.5s of history).
    Scrolling past a bright image or a brief flash of a white page must not move the
    backlight.
-2. **Offset.** `rawOffset = −strength · (L_median − 0.35)`, clamped to
-   `±maxOffset`. `L = 0.35` is the neutral point at which no adjustment is applied;
-   `strength` and `maxOffset` come from settings (defaults **0.4** and 0.20).
-   The default is chosen so the response is graded rather than saturated: a
-   moderately light page (`L ≈ 0.6`) yields about −0.10, while a near-white page
-   (`L ≈ 0.95`) reaches the −0.20 clamp. A larger `strength` would push almost all
-   light content straight to the clamp, making the app behave like a two-state
-   switch.
+2. **Offset.** `rawOffset = −strength · (L_median − 0.50)`, clamped to
+   `±maxOffset`. `L = 0.50` (perceptual, i.e. sRGB mid-gray) is the neutral point at
+   which no adjustment is applied; `strength` and `maxOffset` come from settings
+   (defaults **0.45** and 0.20). Resulting behavior:
+
+   | Content | `L` | Offset |
+   |---|---|---|
+   | Near-white page | 0.95 | −0.20 (clamped) |
+   | Light page | 0.80 | −0.135 |
+   | Mid-gray | 0.50 | 0 |
+   | Dark-mode editor | 0.30 | +0.09 |
+   | Dark film scene | 0.17 | +0.15 |
+
+   The default is chosen so the response is graded rather than saturated. A much
+   larger `strength` would push almost all light content straight to the clamp,
+   making the app behave like a two-state switch.
 3. **Deadband.** If `|rawOffset − appliedOffset| < 0.02`, hold the current value.
    This is what stops slow oscillation around a steady scene.
 4. **Slew limit.** Move `appliedOffset` toward `rawOffset` by at most 0.10 per
@@ -144,7 +190,7 @@ Implementation resolves symbols via `dlopen`/`dlsym` at startup:
 SwiftUI `MenuBarExtra`, `LSUIElement` (no dock icon).
 
 - Enable/disable toggle
-- Strength slider (maps to `strength`, range 0.2–0.8, default 0.4)
+- Strength slider (maps to `strength`, range 0.2–0.9, default 0.45)
 - Max offset slider (0.05–0.35)
 - Pause for 1 hour
 - Launch at login (`SMAppService`)
@@ -199,16 +245,25 @@ On quit, brightness is restored to `baseline`.
 **LuminanceAnalyzer** — synthetic frames:
 
 - Solid white → `L` near 1.0; solid black → near 0.0
-- Mid-gray sRGB 128 → linear ≈ 0.216, not 0.5 (guards the gamma bug)
+- Mid-gray sRGB 128 → `L` ≈ 0.50, and the intermediate linear value ≈ 0.216, not 0.5
+  (guards the gamma bug in both directions — averaging must be linear, output must
+  be perceptual)
+- A frame that is half white and half black → `L` well below 0.75, because the two
+  halves average in linear space (guards against averaging in gamma space)
 - Letterboxed dark scene: identical content with and without black bars must yield
   `L` within 0.02 of each other (guards the regression that inverts behavior on
   full-screen video)
+- Letterboxed frame with a bright subtitle band in the lower bar must crop
+  identically to the same frame without it
 - A frame that is 90% black with a small white region → `L` stays low
 
 **Controller** — sequences of luminance values against a fake actuator:
 
 - White page (L≈0.95) drives offset to the negative clamp, and no further
-- Dark video (L≈0.10) drives offset positive, and no further
+- Dark video (L≈0.17) drives offset positive, and no further
+- Mid-gray (L≈0.50) produces zero offset
+- Dark-mode editor (L≈0.30) produces a modest positive offset, well short of the
+  clamp — it must not be treated like a dark film
 - One-tick spike between steady samples produces no change (transient rejection)
 - Step change takes ≥ 1.8s to complete (slew limit)
 - Steady input inside the deadband produces zero writes
@@ -245,5 +300,5 @@ a contained change.
 |---|---|
 | Private API removed in a future macOS | Actuator degrades to a clear "unsupported" state; two independent API paths tried |
 | Adjustment feels intrusive | Conservative defaults, deadband, slew limit, user-tunable strength, one-click pause |
-| Fights macOS ambient auto-brightness | Re-baselining treats ALS movement as user intent rather than as error |
+| Fights macOS ambient auto-brightness | Re-baselining treats ALS movement as user intent; verified empirically as an early plan step, with a documented fallback of requiring the setting be off |
 | Screen Recording permission friction | Surfaced explicitly in the menu bar with a link to System Settings |
