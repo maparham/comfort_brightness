@@ -270,19 +270,26 @@ extension ScreenSampler: SCStreamOutput {
         }
     }
 
-    /// True only for frames that actually contain new screen content.
+    /// True for frames that actually contain new screen content.
     ///
     /// ScreenCaptureKit also delivers `.idle` and `.blank` frames, whose surface
     /// contents are undefined and often black. Measuring one of those would read
     /// as a pitch-dark screen and ramp the panel to the full positive offset on
     /// content that never changed.
+    ///
+    /// This deliberately fails *open*: a frame is rejected only when the status
+    /// attachment is present, readable, and says the frame is not complete. If
+    /// the attachment is missing or does not bridge as expected, the frame is
+    /// measured. Rejecting on an unreadable attachment would drop every frame
+    /// forever — a total, silent failure — in exchange for guarding an edge case.
     nonisolated static func isComplete(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
             sampleBuffer,
             createIfNecessary: false
         ) as? [[SCStreamFrameInfo: Any]],
-            let raw = attachments.first?[.status] as? Int,
-            let frameStatus = SCFrameStatus(rawValue: raw) else { return false }
+            let raw = attachments.first?[.status],
+            let value = raw as? Int,
+            let frameStatus = SCFrameStatus(rawValue: value) else { return true }
         return frameStatus == .complete
     }
 

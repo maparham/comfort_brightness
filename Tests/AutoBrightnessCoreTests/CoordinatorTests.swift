@@ -82,6 +82,10 @@ func resumeRampsIn() {
         coordinator.tick(luminance: 0.95)
     }
     coordinator.suspend()
+    // Suspending must hand the panel straight back. This is the mechanism the
+    // sampler leans on when a stream stalls: without the write here, a stalled
+    // capture would leave the offset applied with nothing left to unwind it.
+    #expect(abs((fake.read() ?? 0) - 0.60) < 1e-6)
 
     // While asleep the user sets a very different level.
     fake.externalChange(to: 0.30)
