@@ -13,12 +13,23 @@ private typealias CDSet = @convention(c) (CGDirectDisplayID, Double) -> Void
 /// There is no public API for this. Symbols are resolved at runtime rather than
 /// linked, so a future macOS that removes them yields `canControl == false`
 /// instead of a launch failure.
+///
+/// Resolution is re-done whenever the built-in panel we are talking to changes,
+/// and never happens at all while there is no built-in panel. Probing a display
+/// that is not the one we will drive gives the wrong answer: launched in
+/// clamshell mode with an external monitor as main, a one-time probe asked the
+/// external whether its brightness could be changed, was told no, and disabled
+/// every code path for the rest of the process — opening the lid could not
+/// recover it.
 public final class DisplayServicesBrightness: BrightnessControlling {
     private var cachedDisplayID: CGDirectDisplayID?
-    private let dsGet: DSGet?
-    private let dsSet: DSSet?
-    private let cdGet: CDGet?
-    private let cdSet: CDSet?
+    private var dsGet: DSGet?
+    private var dsSet: DSSet?
+    private var cdGet: CDGet?
+    private var cdSet: CDSet?
+    /// The display the current symbols were probed against, or nil if none have
+    /// been resolved yet.
+    private var resolvedForDisplayID: CGDirectDisplayID?
 
     /// The built-in panel, or nil when there isn't one — no built-in display at
     /// all, or a laptop closed in clamshell mode. The spec is explicit that
@@ -46,10 +57,15 @@ public final class DisplayServicesBrightness: BrightnessControlling {
 
     public init(displayID: CGDirectDisplayID? = DisplayServicesBrightness.builtinDisplayID()) {
         self.cachedDisplayID = displayID
-        // Probe against whatever built-in panel exists now; if there is none, the
-        // symbols still resolve and control becomes possible as soon as one
-        // appears.
-        let probeID = displayID ?? CGMainDisplayID()
+    }
+
+    /// Resolves the private symbols against the panel we are actually going to
+    /// drive, redoing the work if that panel has changed since last time. Cheap
+    /// enough to sit in front of every call: `dlopen` of an already-loaded
+    /// framework is a lookup, and after the first call the guard exits at once.
+    private func resolveSymbolsIfNeeded(for id: CGDirectDisplayID) {
+        guard resolvedForDisplayID != id else { return }
+        resolvedForDisplayID = id
 
         let displayServices = dlopen(
             "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices",
@@ -63,7 +79,7 @@ public final class DisplayServicesBrightness: BrightnessControlling {
         var canChange = true
         if let symbol = ds("DisplayServicesCanChangeBrightness") {
             let fn = unsafeBitCast(symbol, to: DSCan.self)
-            canChange = fn(probeID) != 0
+            canChange = fn(id) != 0
         }
 
         if canChange,
@@ -97,13 +113,20 @@ public final class DisplayServicesBrightness: BrightnessControlling {
         }
     }
 
+    /// The built-in panel plus a working set of symbols for it, or nil.
+    private var controllableDisplayID: CGDirectDisplayID? {
+        guard let id = displayID else { return nil }
+        resolveSymbolsIfNeeded(for: id)
+        return id
+    }
+
     public var canControl: Bool {
-        guard displayID != nil else { return false }
+        guard controllableDisplayID != nil else { return false }
         return (dsGet != nil && dsSet != nil) || (cdGet != nil && cdSet != nil)
     }
 
     public func read() -> Double? {
-        guard let displayID else { return nil }
+        guard let displayID = controllableDisplayID else { return nil }
         if let dsGet {
             var value: Float = 0
             if dsGet(displayID, &value) == 0 {
@@ -117,7 +140,7 @@ public final class DisplayServicesBrightness: BrightnessControlling {
     }
 
     public func write(_ value: Double) {
-        guard let displayID else { return }
+        guard let displayID = controllableDisplayID else { return }
         let clamped = min(max(value, 0.0), 1.0)
         if let dsSet {
             _ = dsSet(displayID, Float(clamped))

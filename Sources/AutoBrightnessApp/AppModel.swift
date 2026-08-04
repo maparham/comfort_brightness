@@ -25,6 +25,12 @@ public final class AppModel {
     /// own, and that ordering is the difference between the capture stopping and
     /// the screen-recording indicator staying lit indefinitely.
     private var samplerTask: Task<Void, Never>?
+    /// Watches for displays arriving and leaving, so that a lid opened in
+    /// clamshell mode is noticed. This is deliberately independent of the
+    /// sampler's own observer: when brightness control is unavailable the
+    /// sampler is stopped and its observer is gone, which is exactly the state
+    /// this has to recover from.
+    private var displayObserver: (any NSObjectProtocol)?
     /// True while a user-requested "pause for 1 hour" is in effect. This is
     /// tracked separately from `Coordinator.isPaused` because system sleep/wake
     /// and the `isEnabled` toggle also drive `Coordinator.suspend()`/`resume()`
@@ -136,6 +142,20 @@ public final class AppModel {
                 self.applyRunState()
             }
         )
+
+        // Unconditional on purpose. Plugging in a display, unplugging one, or
+        // opening the lid changes whether there is a built-in panel to control
+        // at all, and when there is not, nothing else in the app is running to
+        // notice that one has appeared.
+        displayObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.applyRunState()
+            }
+        }
 
         applyRunState()
     }

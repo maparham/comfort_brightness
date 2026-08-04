@@ -40,7 +40,10 @@ applied.
 
 If you press a brightness key, that new level becomes the baseline
 immediately — the app re-baselines rather than fighting you or undoing your
-adjustment. The same happens when you disable the app, pause it, or quit it:
+adjustment. The same holds for a gradual change rather than a keypress: a
+brightness that eases up or down over several seconds, as macOS's ambient
+controller does, is followed as it moves rather than partly absorbed and
+partly written back down. The same happens when you disable the app, pause it, or quit it:
 the panel returns to your baseline, not to some app-internal default.
 
 ## Screen Recording permission
@@ -69,6 +72,15 @@ change in the underlying brightness level as new user intent, an ambient-
 sensor-driven change is expected to simply become the new baseline, the same
 way a keypress would.
 
+Following a *smooth* change, not just a stepped one, is what this depends on,
+and it is pinned by tests: a ramp applied on top of the app's own writes is
+followed in full, in either direction, including one slow enough that no single
+half-second reading would register it. Distinguishing that from an actuator
+whose read-back simply disagrees with what it was given takes an actual
+measurement, so when the same movement repeats the app skips one write and
+looks at what the panel does with its hands off: a lying actuator stays put, a
+real change keeps moving.
+
 That said, this coexistence has not yet been verified empirically. A
 diagnostic, `Sources/ALSProbe/main.swift`, exists specifically to measure it:
 run it with `swift run ALSProbe` with "Automatically adjust brightness"
@@ -90,7 +102,9 @@ left untouched. It finds the built-in panel explicitly rather than using
 whichever display is primary, so an external monitor set as the main display
 changes nothing: the app still measures and adjusts the built-in one. With no
 built-in panel available — a Mac mini, or a laptop closed in clamshell mode —
-it reports that and does nothing at all. Brightness read-back on Apple
+it reports that and does nothing at all, and it starts working the moment a
+built-in panel appears: open the lid, or undock, and the app picks it up
+without needing to be relaunched. Brightness read-back on Apple
 Silicon hardware is exact, so the app always knows the true current level
 before applying an offset.
 

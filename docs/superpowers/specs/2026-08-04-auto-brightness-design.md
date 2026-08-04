@@ -105,15 +105,25 @@ Owns an `SCStream` over the built-in `SCDisplay`.
   fallback.
 - Only frames whose `SCStreamFrameInfoStatus` is `.complete` are measured. `.idle`
   and `.blank` frames carry undefined surface contents, and measuring one reads as
-  a pitch-black screen.
+  a pitch-black screen. Liveness, however, is judged on *every* frame that
+  arrives, `.idle` included: `.idle` means "nothing on screen changed", which is
+  the normal state of a desktop being read rather than a sign of trouble. Judging
+  liveness on `.complete` frames alone declares a stall on any static screen and
+  pulses the brightness down and back up for as long as the user sits still.
+- Status becomes `.running` on the first frame, not when the stream opens. An
+  open stream says nothing about frames arriving, and `.running` is what makes
+  the rest of the app start adjusting.
 - Restarts the stream on display reconfiguration (resolution change, sleep/wake)
   and on `stream(_:didStopWithError:)`, and runs a watchdog that restarts it if no
-  frame arrives for 4 seconds. A stalled stream reports `.stalled` upward, which
-  suspends adjustment: a frozen measurement must never leave an offset applied to
-  the panel with the UI still claiming to be running.
+  frame of any kind arrives for 10 seconds. A stalled stream reports `.stalled`
+  upward, which suspends adjustment: a frozen measurement must never leave an
+  offset applied to the panel with the UI still claiming to be running.
 - Capture stops entirely whenever the app is disabled or paused. The screen is not
   sampled — and the screen-recording indicator is not lit — while the app is not
-  acting on what it sees.
+  acting on what it sees. Opening a stream spans several `await`s, so the
+  caller's intent is re-checked after each one and any stream opened against a
+  withdrawn intent is torn down; start/stop requests are serialized so that
+  rapid toggling cannot run them out of order and strand a live capture.
 
 **Interface:** `start()`, `stop()`, `onFrame: (Frame) -> Void`,
 `onStatus: (SamplerStatus) -> Void`. Depends on ScreenCaptureKit only.
@@ -223,7 +233,13 @@ protocol BrightnessControlling {
 }
 ```
 
-Implementation resolves symbols via `dlopen`/`dlsym` at startup:
+Implementation resolves symbols via `dlopen`/`dlsym`, against the built-in panel
+and re-resolved whenever that panel changes — never once at startup against
+whatever display happens to be main. Launched in clamshell mode, a one-time probe
+asks an external monitor whether its brightness can be changed, is told no, and
+disables every path for the life of the process; opening the lid must recover
+without a relaunch. While no built-in panel exists, nothing is resolved and
+`canControl` is false.
 
 - Primary: `DisplayServicesGetBrightness` / `DisplayServicesSetBrightness`,
   gated on `DisplayServicesCanChangeBrightness`.
@@ -235,7 +251,11 @@ Implementation resolves symbols via `dlopen`/`dlsym` at startup:
   measured on real hardware.
 - The display ID is the built-in panel's, resolved through `CGDisplayIsBuiltin`
   and re-resolved as displays come and go. No built-in panel means `canControl` is
-  false: externals are never driven.
+  false: externals are never driven. The app watches
+  `NSApplication.didChangeScreenParametersNotification` independently of the
+  sampler, since when control is unavailable the sampler is stopped and its own
+  observer is gone — which is precisely the state a lid opening has to recover
+  from.
 - If neither resolves, the app reports "unsupported on this macOS version" in the
   menu bar and does not attempt any adjustment. This is the expected failure mode
   on a future OS release and must degrade cleanly rather than crash.
@@ -277,14 +297,25 @@ brightness equals what they set, and the content offset continues to ride on top
 
 Two guards keep step 2 from turning an instrument error into a runaway:
 
-- **Intent is an event, bias is a constant.** A discrepancy that repeats
-  unchanged tick after tick is not a user; it is an actuator whose read-back does
-  not agree with what it was given. Those are ignored, and the write reference is
-  *held* rather than updated while they are — so a genuine slow drift keeps
-  accumulating against a fixed reference and is picked up within a tick or two,
-  while a fixed bias never grows and never moves the baseline again. Without this,
-  a bias of ε > 0.01 walks the baseline by ε twice a second until the panel hits a
-  rail, in seconds.
+- **One withheld write tells a bias from a ramp.** While the app writes every
+  tick, its own write re-anchors the panel, so an actuator with a constant
+  read-back bias ε and an external ramp of ε per tick produce *identical*
+  readings — no passive per-tick statistic can separate them, and treating a
+  repeated discrepancy as bias absorbs most of a real ambient ramp (measured:
+  42% of a 0.012/tick ramp followed, the rest written back down). So when the
+  same movement repeats, the app withholds its write for exactly one tick and
+  looks: a bias stays where the last write left it, a ramp keeps going. A
+  confirmed bias is recorded once and subtracted from every later reading; a
+  confirmed movement is followed in full, and the withheld tick costs nothing
+  because the movement is still there to be measured. Without this, a bias of
+  ε > 0.01 walks the baseline by ε twice a second until the panel hits a rail;
+  the per-tick bound below does not help, since it bounds each step and not the
+  accumulation.
+- **Movement below the threshold is accumulated, not discarded.** A drift too
+  slow to clear 0.01 on any single tick is physically erased by the app's own
+  next write. The unfollowed movement is summed, and the erased part is added
+  back when the baseline follows, so a slow ambient ramp is followed in full
+  rather than a fraction at a time.
 - **A per-tick bound.** The baseline moves at most 0.25 in one tick — far more
   than any brightness keypress (1/16). A larger jump (a slider dragged across its
   range) is followed over the next few ticks, and nothing is written while catching
@@ -344,9 +375,14 @@ On quit, brightness is restored to `baseline`.
 - `baseline + offset` never leaves `[0.05, 1.0]`
 - External brightness change re-baselines such that total equals the observed value
 - An actuator whose read-back is systematically off by 0.05, driven with *varying*
-  luminance for 200 ticks, does not walk the baseline (a static scene writes
-  nothing and would pass even with the bug)
-- A slow ambient drift below the per-tick threshold is still picked up
+  luminance, does not walk the baseline (a static scene writes nothing and would
+  pass even with the bug), and ends at the same baseline after 600 ticks as after
+  40 — the property is "does not accumulate", not "is small so far"
+- A smooth external ramp applied *on top of* the app's own writes — 0.012 per
+  tick, either direction, with varying luminance so writes actually occur — is
+  followed to better than 90%
+- A ramp of 0.006 per tick, below the per-tick threshold and erased by the app's
+  own writes, is still followed to better than 90%
 - A 0.65 external jump moves the baseline at most 0.25 that tick, writes nothing,
   and converges within a few ticks
 
