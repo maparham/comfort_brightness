@@ -39,14 +39,18 @@ func midGrayIsNeutral() {
 
 @Test("A half-white frame dims substantially")
 func halfWhiteFrame() {
-    // 32 white rows over 32 black rows. Note the crop runs first and removes 16
-    // of the 32 black rows (the 25% cap), so the mean is 256/384 = 0.667, not
-    // 0.5. With p75 saturated at white: 0.6 + 0.4*0.667 = 0.867 linear, which is
-    // 0.937 perceptual. Half a screen of glaring white should dim, and this pins
+    // 32 white rows over 32 black rows. The black half is at one edge only, so
+    // it is content rather than a bar and nothing is cropped: mean 0.5, p75
+    // saturated at white, 0.6 + 0.4*0.5 = 0.80 linear = 0.903 perceptual, an
+    // offset of -0.18. Half a screen of glaring white should dim, and this pins
     // that intent.
+    //
+    // (Before the crop was gated on opposing edges this read 0.937, because the
+    // crop ate 16 of the black rows. The intent is unchanged; the number moved
+    // because a one-sided dark region is no longer eroded.)
     let grays: [UInt8] = Array(repeating: 255, count: 32) + Array(repeating: 0, count: 32)
     let value = LuminanceAnalyzer.analyze(rows(grays, width: 8))
-    #expect(abs(value - 0.937) < 0.01)
+    #expect(abs(value - 0.903) < 0.01)
 }
 
 @Test("A mostly black frame with a small bright region stays dark")
@@ -84,6 +88,107 @@ func subtitleIsNeutral() {
     }
     let subtitled = LuminanceAnalyzer.analyze(Frame(width: 8, height: grays.count, bgra: bgra))
     #expect(abs(bare - subtitled) < 0.02)
+}
+
+/// A full-screen dark editor at capture resolution: title strip, line-number
+/// gutter, and text lines. At 64px wide a glyph run downscales into a smear
+/// covering part of the row rather than individual characters.
+private func darkEditor(background: UInt8) -> Frame {
+    let width = 64
+    let height = 40
+    var bgra: [UInt8] = []
+    bgra.reserveCapacity(width * height * 4)
+    for row in 0..<height {
+        for col in 0..<width {
+            var gray = background
+            if row < 2 {
+                gray = background &+ 6  // slightly lighter title bar
+            } else if row >= 4, row.isMultiple(of: 2) {
+                if col >= 2, col < 5 {
+                    gray = 90  // line numbers
+                } else if col >= 8, col < 58, (col * 7 + row * 3) % 10 < 4 {
+                    gray = 170  // text
+                }
+            }
+            bgra.append(contentsOf: [gray, gray, gray, 255])
+        }
+    }
+    return Frame(width: width, height: height, bgra: bgra)
+}
+
+/// A dark film scene, optionally inside black bars, at capture resolution.
+private func filmScene(barRows: Int) -> Frame {
+    let width = 64
+    let picture = 24
+    let height = picture + 2 * barRows
+    var bgra: [UInt8] = []
+    for row in 0..<height {
+        let pictureRow = row - barRows
+        for col in 0..<width {
+            var gray: UInt8 = 0
+            if pictureRow >= 0, pictureRow < picture {
+                // A dark scene with one small highlight — a lit face, a lamp.
+                let lit = pictureRow >= 8 && pictureRow < 16 && col >= 26 && col < 36
+                gray = lit ? 120 : 40
+            }
+            bgra.append(contentsOf: [gray, gray, gray, 255])
+        }
+    }
+    return Frame(width: width, height: height, bgra: bgra)
+}
+
+/// Settles the controller on one luminance value and returns the offset.
+private func offset(for luminance: Double) -> Double {
+    var controller = Controller()
+    for _ in 0..<40 {
+        _ = controller.update(luminance: luminance, baseline: 0.5, settings: .defaults)
+    }
+    return controller.appliedOffset
+}
+
+@Test("A full-screen dark editor reads as dark UI, not as a dark film")
+func darkEditorFrame() {
+    // The seam the review found untested: a dark-editor *frame* through
+    // `analyze`, not a hand-picked luminance through `Controller`. Before the
+    // crop was gated, this frame lost a quarter of every edge, the text-dense
+    // centre survived, and L came out around 0.51 — brighter than mid-gray, so
+    // the app would have *dimmed* a dark editor.
+    let value = LuminanceAnalyzer.analyze(darkEditor(background: 30))  // #1e1e1e
+    #expect(value > 0.15)
+    #expect(value < 0.45)
+    let lift = offset(for: value)
+    #expect(lift > 0.02)
+    #expect(lift < 0.15)  // modest, well short of the ±0.20 clamp
+}
+
+@Test("Sweeping a dark editor's background produces no cliff")
+func darkEditorSweepIsContinuous() {
+    // The reviewer's measured discontinuity: at 8-bit gray 38 the old crop fired
+    // and at 40 it did not, so L jumped from 0.234 to 0.510 — a 0.12 swing in
+    // offset that the deadband cannot suppress and the slew limit only stretches
+    // into a visible ramp. Neighbouring backgrounds must now read alike.
+    let low = LuminanceAnalyzer.analyze(darkEditor(background: 38))
+    let high = LuminanceAnalyzer.analyze(darkEditor(background: 40))
+    #expect(abs(low - high) < 0.02)
+
+    // And nowhere else across the range of plausible dark themes.
+    var previous = LuminanceAnalyzer.analyze(darkEditor(background: 16))
+    for background in stride(from: UInt8(18), through: UInt8(60), by: 2) {
+        let value = LuminanceAnalyzer.analyze(darkEditor(background: background))
+        #expect(abs(value - previous) < 0.03)
+        previous = value
+    }
+}
+
+@Test("A letterboxed dark film is still cropped and still brightens")
+func letterboxedFilmStillCrops() {
+    // The case the crop exists for. Black bars must not be measured as part of
+    // the picture, so the boxed and unboxed readings must agree, and the scene
+    // must still call for a real lift.
+    let boxed = LuminanceAnalyzer.analyze(filmScene(barRows: 8))
+    let bare = LuminanceAnalyzer.analyze(filmScene(barRows: 0))
+    #expect(abs(boxed - bare) < 0.02)
+    #expect(offset(for: boxed) > 0.10)
 }
 
 @Test("Percentile picks the nearest rank")

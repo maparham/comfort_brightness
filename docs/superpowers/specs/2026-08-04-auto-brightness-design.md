@@ -113,24 +113,38 @@ Steps:
    (`0.2126 R + 0.7152 G + 0.0722 B`). Averaging gamma-encoded values is the
    common error here and materially misjudges dark content.
 2. **Letterbox crop.** Scan inward from each edge, dropping rows/columns whose
-   **median** luminance is below 0.02. Stop at the first non-conforming row/column,
-   and never crop more than 25% from any edge.
+   **median** luminance is below 0.005 (linear; 8-bit gray ≈ 20). Stop at the first
+   non-conforming row/column, and never crop more than 25% from any edge.
    A strict "every pixel below threshold" test would be defeated by a single
    subtitle glyph sitting in the lower bar: the crop would stop, `L` would drop, and
    the app would brighten — intermittently, for the duration of every subtitle.
    The median is used rather than a high percentile because at 64px wide a subtitle
    downscales to a smear that can cover a substantial fraction of a row; a p90 test
    tolerates only 10% bright pixels, while the median tolerates 50% and no subtitle
-   spans half a row. The cost is that genuinely dark content rows at the frame edge
-   may be cropped too, and the crop is capped at 25% per edge regardless.
+   spans half a row.
 
-   Note that this step is not specific to video: it fires on any dark region at a
-   screen edge — a dark dock area, a black sidebar, a dark-themed terminal
-   occupying the bottom of the screen. That is accepted rather than accidental.
-   The effect is a mild center-weighting of the measurement, which is reasonable
-   on its own terms, and the 25% cap bounds how far it can go.
+   Because engaging the crop is a *step* change in the measurement, it is gated so
+   that it fires on real bars and nothing else. Three conditions, all required:
+
+   - **Black, not merely dark.** 0.005 linear rather than 0.02. Real bars are
+     composited as pure black; dark UI themes are not (VS Code Dark+ `#1e1e1e` is
+     0.0129 linear, One Dark `#282c34` is 0.026). At 0.02 those two straddle the
+     threshold, so a scrolling editor or a terminal filling with output would cross
+     it and swing `L` by ~0.28 — pumping with no user-perceptible cause.
+   - **Opposing edges.** Rows are cropped only when *both* top and bottom are bars,
+     columns only when both sides are. A dark region on one edge is a dock, a
+     sidebar or a terminal, and is part of the content.
+   - **The remainder must be brighter than the bars.** If what survives is as dark
+     as what was removed, the frame is uniformly dark content — a black terminal, a
+     fade to black — and it is measured uncropped. This is also what makes the gate
+     safe at its own boundary: it can only disengage when bars and content are
+     indistinguishable, which is exactly when the crop would not have changed the
+     result anyway.
+
    Without this step a letterboxed film's black bars pull the average down and the
-   controller raises brightness, the opposite of the desired behavior.
+   lift comes out larger than the visible picture warrants. Raising brightness for a
+   dark film is the *intended* response; the bars just must not be counted as part
+   of the picture when deciding how far to raise it.
 3. **Statistic.** `L_linear = 0.6 · p75 + 0.4 · mean` over the cropped region. The
    75th percentile represents the content the user is actually looking at; the mean
    prevents a small bright region from dominating.
@@ -266,10 +280,12 @@ On quit, brightness is restored to `baseline`.
 - Mid-gray sRGB 128 → `L` ≈ 0.50, and the intermediate linear value ≈ 0.216, not 0.5
   (guards the gamma bug in both directions — averaging must be linear, output must
   be perceptual)
-- A frame that is half white and half black → `L` ≈ 0.94, because the p75 term is
-  saturated by the white half and the crop removes part of the black half. A
-  screen that is half glaring white should dim substantially; this test pins that
-  intent.
+- A frame that is half white and half black → `L` ≈ 0.90, because the p75 term is
+  saturated by the white half (the black half is at one edge only, so it is not a
+  bar and is not cropped). A screen that is half glaring white should dim
+  substantially; this test pins that intent.
+- A full-screen dark editor frame → `L` ≈ 0.22 and a modest positive offset, and
+  sweeping its background across the 8-bit range must not produce a cliff in `L`
 - Letterboxed dark scene: identical content with and without black bars must yield
   `L` within 0.02 of each other (guards the regression that inverts behavior on
   full-screen video)
