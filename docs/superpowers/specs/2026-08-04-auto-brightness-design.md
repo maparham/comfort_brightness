@@ -33,9 +33,10 @@ interpret this app's 2 Hz writes the same way — in which case the two controll
 would slowly adapt to each other and the baseline would drift. **The implementation
 plan must verify this early**, before the control law is tuned: with ambient
 auto-brightness on, hold a static white page under steady lighting for several
-minutes and watch whether the baseline walks. If it does, the app detects that the
-setting is enabled and asks the user to turn it off, rather than claiming a
-coexistence it does not have.
+minutes and watch whether the baseline walks. If it does, the fallback is to
+document that the setting must be turned off, and to say so in the menu — the app
+cannot detect it automatically, because no `DisplayServices` symbol exposes that
+setting (`DisplayServicesGetAutoBrightness` does not exist on this OS).
 
 ### Feasibility, verified
 
@@ -47,8 +48,15 @@ On this machine (macOS 26.5, arm64) the following symbols resolve:
   `CoreDisplay_Display_SetUserBrightness`
 - `ScreenCaptureKit.framework` present
 
-`DisplayServicesBrightnessChanged` is absent, so change detection uses polling
-rather than a notification callback.
+`DisplayServicesBrightnessChanged` is absent.
+`DisplayServicesRegisterForBrightnessChangeNotifications` does exist, but its
+callback signature is undocumented and getting it wrong crashes the process.
+Change detection therefore uses polling, which costs nothing at 2 Hz and is
+verified working. The notification API is noted as a possible later refinement,
+not a dependency.
+
+There is also no symbol for reading the "Automatically adjust brightness" setting
+(`DisplayServicesGetAutoBrightness` is absent), so the app cannot detect it.
 
 Measured on this machine by writing values and reading them back:
 
@@ -105,12 +113,17 @@ Steps:
    (`0.2126 R + 0.7152 G + 0.0722 B`). Averaging gamma-encoded values is the
    common error here and materially misjudges dark content.
 2. **Letterbox crop.** Scan inward from each edge, dropping rows/columns whose
-   **90th-percentile** luminance is below 0.02. Stop at the first non-conforming
-   row/column, and never crop more than 25% from any edge.
+   **median** luminance is below 0.02. Stop at the first non-conforming row/column,
+   and never crop more than 25% from any edge.
    A strict "every pixel below threshold" test would be defeated by a single
    subtitle glyph sitting in the lower bar: the crop would stop, `L` would drop, and
-   the app would brighten — intermittently, for the duration of every subtitle. The
-   percentile test tolerates sparse bright pixels in an otherwise black row.
+   the app would brighten — intermittently, for the duration of every subtitle.
+   The median is used rather than a high percentile because at 64px wide a subtitle
+   downscales to a smear that can cover a substantial fraction of a row; a p90 test
+   tolerates only 10% bright pixels, while the median tolerates 50% and no subtitle
+   spans half a row. The cost is that genuinely dark content rows at the frame edge
+   may be cropped too, which is harmless — they contribute almost nothing to the
+   statistic, and the crop is capped at 25% per edge regardless.
    Without this step a letterboxed film's black bars pull the average down and the
    controller raises brightness, the opposite of the desired behavior.
 3. **Statistic.** `L_linear = 0.6 · p75 + 0.4 · mean` over the cropped region. The
@@ -248,8 +261,9 @@ On quit, brightness is restored to `baseline`.
 - Mid-gray sRGB 128 → `L` ≈ 0.50, and the intermediate linear value ≈ 0.216, not 0.5
   (guards the gamma bug in both directions — averaging must be linear, output must
   be perceptual)
-- A frame that is half white and half black → `L` well below 0.75, because the two
-  halves average in linear space (guards against averaging in gamma space)
+- A frame that is half white and half black → `L` ≈ 0.90, because the p75 term is
+  saturated by the white half. A screen that is half glaring white should dim
+  substantially; this test pins that intent.
 - Letterboxed dark scene: identical content with and without black bars must yield
   `L` within 0.02 of each other (guards the regression that inverts behavior on
   full-screen video)
