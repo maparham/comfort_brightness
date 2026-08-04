@@ -32,7 +32,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        model.quit()
+        // Not `model.quit()`: that would call `terminate(_:)` again, which
+        // AppKit is already in the middle of. `prepareForTermination()` only
+        // restores the baseline (idempotently, so the Quit-button path that
+        // already restored it is a no-op here), covering termination paths
+        // that never went through `quit()` at all — logout, Activity Monitor.
+        model.prepareForTermination()
     }
 
     @objc private func togglePopover() {

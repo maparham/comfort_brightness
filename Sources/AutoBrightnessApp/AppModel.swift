@@ -12,6 +12,16 @@ public final class AppModel {
     private var sampler: ScreenSampler?
     private var pauseMonitor: PauseMonitor?
     private var pauseTimer: Timer?
+    /// True while a user-requested "pause for 1 hour" is in effect. This is
+    /// tracked separately from `Coordinator.isPaused` because system sleep/wake
+    /// and the `isEnabled` toggle also drive `Coordinator.suspend()`/`resume()`
+    /// — without this flag, a system wake or a disable/re-enable would silently
+    /// cancel a manual pause early.
+    private var isManuallyPaused = false
+    /// Guards the restore-and-terminate sequence so it runs exactly once
+    /// whether it is entered via the Quit button or via
+    /// `applicationWillTerminate` (logout, Activity Monitor, etc).
+    private var hasRestoredBaseline = false
 
     public var status: SamplerStatus = .idle
     public private(set) var luminance: Double = 0.5
@@ -23,6 +33,11 @@ public final class AppModel {
     public var isEnabled: Bool {
         didSet {
             coordinator.isEnabled = isEnabled
+            // Coordinator.isEnabled's own didSet calls resume() when turning
+            // back on, which would clear a manual pause. Re-assert it.
+            if isEnabled && isManuallyPaused {
+                coordinator.suspend()
+            }
             UserDefaults.standard.set(isEnabled, forKey: "isEnabled")
             refreshReadouts()
         }
@@ -83,8 +98,17 @@ public final class AppModel {
 
     public func start() async {
         let monitor = PauseMonitor(
-            onSuspend: { [weak self] in self?.coordinator.suspend() },
-            onResume: { [weak self] in self?.coordinator.resume() }
+            onSuspend: { [weak self] in
+                self?.coordinator.suspend()
+                self?.refreshReadouts()
+            },
+            onResume: { [weak self] in
+                // A manual "pause for 1 hour" must outlive a sleep/wake cycle:
+                // only resume automatically if the user didn't ask to be paused.
+                guard let self, !self.isManuallyPaused else { return }
+                self.coordinator.resume()
+                self.refreshReadouts()
+            }
         )
         monitor.start()
         pauseMonitor = monitor
@@ -106,6 +130,7 @@ public final class AppModel {
 
     /// Stops adjusting for an hour, then resumes on its own.
     public func pauseForAnHour() {
+        isManuallyPaused = true
         coordinator.suspend()
         pausedUntilLabel = Self.timeFormatter.string(
             from: Date().addingTimeInterval(3600)
@@ -113,22 +138,39 @@ public final class AppModel {
         pauseTimer?.invalidate()
         pauseTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.coordinator.resume()
-                self?.pausedUntilLabel = nil
+                self?.endPause()
             }
         }
+        refreshReadouts()
     }
 
     public func endPause() {
+        isManuallyPaused = false
         pauseTimer?.invalidate()
         pauseTimer = nil
         pausedUntilLabel = nil
         coordinator.resume()
+        refreshReadouts()
     }
 
     public func quit() {
-        coordinator.restoreBaseline()
+        restoreBaselineOnce()
         NSApplication.shared.terminate(nil)
+    }
+
+    /// Called from `applicationWillTerminate`, which fires both when the user
+    /// quits normally (after `quit()` already restored the baseline) and when
+    /// the process is terminated some other way (logout, Activity Monitor).
+    /// Restoring here too, behind the same guard, covers that second case
+    /// without double-restoring or re-entering `terminate(_:)`.
+    public func prepareForTermination() {
+        restoreBaselineOnce()
+    }
+
+    private func restoreBaselineOnce() {
+        guard !hasRestoredBaseline else { return }
+        hasRestoredBaseline = true
+        coordinator.restoreBaseline()
     }
 
     private func refreshReadouts() {

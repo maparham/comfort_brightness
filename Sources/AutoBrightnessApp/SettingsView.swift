@@ -42,15 +42,17 @@ public struct SettingsView: View {
 
             Divider()
 
-            if let label = model.pausedUntilLabel {
-                HStack {
-                    Text("Paused until \(label)")
-                        .font(.caption)
-                    Spacer()
-                    Button("Resume", action: model.endPause)
+            if model.isEnabled {
+                if let label = model.pausedUntilLabel {
+                    HStack {
+                        Text("Paused until \(label)")
+                            .font(.caption)
+                        Spacer()
+                        Button("Resume", action: model.endPause)
+                    }
+                } else {
+                    Button("Pause for 1 hour", action: model.pauseForAnHour)
                 }
-            } else {
-                Button("Pause for 1 hour", action: model.pauseForAnHour)
             }
 
             Toggle("Open at login", isOn: $model.launchAtLogin)
