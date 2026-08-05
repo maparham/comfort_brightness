@@ -38,8 +38,8 @@ Same silhouette at glyph scale so the pair reads as one app:
 
 - **Source of truth:** an SVG of the app icon and an SVG of the menu bar glyph, stored under `Resources/` (e.g. `Resources/Icon/`).
 - **Generation script** in `Scripts/` renders PNGs from the SVGs using tools available on macOS (prefer `rsvg-convert` if installed; otherwise render via a small Swift/CoreGraphics or `qlmanage` + `sips` fallback). Regenerating assets is one command.
-- **App icon asset:** `AppIcon.appiconset` in an asset catalog attached to the Xcode target, with the standard macOS sizes (16, 32, 128, 256, 512 pt @1x/@2x, from a 1024 master).
-- **Menu bar icon:** template image asset (asset catalog entry with "Template Image" rendering intent, or `NSImage.isTemplate = true` in code) used by the existing `NSStatusItem` in `main.swift`.
+- **App icon asset:** a single `AppIcon.icns` (all standard macOS sizes, 16–1024 px, packed with `iconutil`) referenced from `Info.plist` via `CFBundleIconFile`. One artifact serves both build paths: the Xcode target ships it as a resource, and `Scripts/make-bundle.sh` copies it into the ad-hoc bundle.
+- **Menu bar icon:** drawn in code (`NSImage(size:flipped:drawingHandler:)` with `isTemplate = true`) so it renders identically whether the executable runs bundled or unbundled (`swift run` has no resource bundle). It replaces only the `sun.max` fallback image; the percentage title behavior is unchanged.
 
 ## Out of scope
 
