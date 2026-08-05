@@ -8,6 +8,9 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    /// The way back in when the status item is not in the menu bar. Held rather
+    /// than rebuilt so reopening twice does not stack windows.
+    private var settingsWindow: NSWindow?
     private let model = AppModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -30,6 +33,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.popover = popover
 
         model.start()
+    }
+
+    /// Opening the app while it is already running puts its settings — and its
+    /// Quit button — on screen.
+    ///
+    /// Without this the app can become unreachable. macOS drops status items it
+    /// has no room for rather than shrinking the bar, and a crowded menu bar on
+    /// a notched display reaches that point easily. An accessory app whose item
+    /// was dropped has no window, no Dock tile and no menu, so there is nothing
+    /// left to click — while it goes on adjusting brightness and holding a
+    /// screen-recording session. Reopening is the one gesture macOS still
+    /// routes to a running accessory app, so it has to lead somewhere.
+    ///
+    /// A window rather than the popover, because the popover is anchored to the
+    /// status item, and the case this exists for is the status item not being
+    /// there to anchor to.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows: Bool
+    ) -> Bool {
+        if settingsWindow == nil {
+            let hosting = NSHostingController(rootView: SettingsView(model: model))
+            hosting.sizingOptions = .preferredContentSize
+            let window = NSWindow(contentViewController: hosting)
+            window.title = "Auto Brightness"
+            window.styleMask = [.titled, .closable]
+            // Closing it must not deallocate it: this object holds the only
+            // reference, and an over-release would take the app down on the
+            // second close.
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        NSApp.activate()
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
