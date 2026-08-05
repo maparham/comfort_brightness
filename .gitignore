@@ -3,3 +3,5 @@
 DerivedData/
 .DS_Store
 .superpowers/
+DerivedData/
+*.xcodeproj/

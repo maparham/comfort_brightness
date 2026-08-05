@@ -1,0 +1,78 @@
+# XcodeGen spec. Regenerate the project with:  xcodegen generate
+#
+# The .xcodeproj is a build artifact and is git-ignored; this file is the source
+# of truth. The Swift package remains authoritative for the engine and its tests
+# (`swift test` still works and is what CI would run) — the Xcode target exists so
+# the app can be built and run as a real, properly signed .app bundle.
+
+name: AutoBrightness
+
+options:
+  bundleIdPrefix: com.mahmoudparham
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  AutoBrightness:
+    path: .
+
+targets:
+  AutoBrightness:
+    type: application
+    platform: macOS
+
+    sources:
+      # Only the shell. The engine arrives via the package dependency below, so
+      # there is exactly one copy of it compiled into the app.
+      - path: Sources/AutoBrightnessApp
+
+    dependencies:
+      - package: AutoBrightness
+        product: AutoBrightnessCore
+
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        PRODUCT_NAME: AutoBrightness
+        PRODUCT_BUNDLE_IDENTIFIER: com.mahmoudparham.AutoBrightness
+
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+
+        # A real signing identity is the whole point of this target. macOS ties
+        # Screen Recording permission to the code signature, so a stable identity
+        # means the permission is granted once rather than on every rebuild.
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 92G3VZAPVG
+        CODE_SIGN_IDENTITY: "Apple Development"
+        ENABLE_HARDENED_RUNTIME: YES
+
+        # The app resolves DisplayServices/CoreDisplay symbols with dlopen. Those
+        # are Apple system frameworks, which the hardened runtime permits — no
+        # library-validation exception is needed, and none is granted here.
+
+        COMBINE_HIDPI_IMAGES: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+      configs:
+        Release:
+          # Distributable identity for anything leaving this machine. Notarize
+          # before sharing; Gatekeeper will otherwise quarantine it.
+          CODE_SIGN_IDENTITY: "Developer ID Application"
+          SWIFT_COMPILATION_MODE: wholemodule
+
+schemes:
+  AutoBrightness:
+    build:
+      targets:
+        AutoBrightness: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    archive:
+      config: Release

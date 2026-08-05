@@ -110,32 +110,56 @@ before applying an offset.
 
 ## Building and installing
 
-Build the app bundle with:
+There are two ways to build, and which you pick determines how often macOS
+asks you for Screen Recording permission.
+
+### Xcode (recommended)
+
+```bash
+xcodegen generate       # only after editing project.yml
+open AutoBrightness.xcodeproj
+```
+
+Build and run with ⌘R. The project is generated from `project.yml` by
+[XcodeGen](https://github.com/yonaskolb/XcodeGen) — `project.yml` is the
+source of truth and the `.xcodeproj` is a git-ignored build artifact, so edit
+the former and regenerate rather than changing settings in Xcode's UI.
+
+Debug builds sign with **Apple Development**, Release with **Developer ID
+Application**. This matters more than it sounds: macOS ties the Screen
+Recording grant to the app's code signature, and a real certificate produces a
+stable one. You grant the permission once and rebuilds keep it. Switching
+between the two configurations counts as a different identity, so expect one
+extra prompt the first time you build Release.
+
+The Swift package remains the source of truth for the engine and its tests —
+`swift test` runs the full suite and does not require Xcode.
+
+### Standalone script
 
 ```bash
 Scripts/make-bundle.sh
-```
-
-This builds a release binary, assembles `AutoBrightness.app` in the
-repository root, and ad-hoc code-signs it. Install it by copying it to your
-Applications folder:
-
-```bash
 cp -R AutoBrightness.app /Applications/
 open /Applications/AutoBrightness.app
 ```
 
-The app runs as a menu bar accessory with no Dock icon. On first launch it
-will prompt for Screen Recording permission; grant it in System Settings >
-Privacy & Security > Screen Recording.
+This builds a release binary, assembles `AutoBrightness.app` in the repository
+root, and **ad-hoc** signs it — no developer certificate needed. The trade-off
+is that an ad-hoc signature changes on every build, so **macOS may ask you to
+re-grant Screen Recording permission after each rebuild**. Use this route if
+you do not have a developer certificate, or for a machine that does not have
+Xcode installed.
 
-Because `Scripts/make-bundle.sh` signs the bundle ad-hoc (no paid developer
-certificate), macOS ties the Screen Recording grant to that specific
-signature. Rebuilding the app produces a new signature, so **you may be
-asked to re-grant Screen Recording permission after every rebuild**. If
-that becomes tiresome, sign the bundle with a free personal Apple
-development certificate instead, which keeps the identity stable across
-rebuilds.
+### Either way
+
+The app runs as a menu bar accessory with no Dock icon. On first launch it
+prompts for Screen Recording permission; grant it in System Settings >
+Privacy & Security > Screen Recording, then quit and reopen the app — macOS
+generally does not hand a running process a capture grant it started without.
+
+Neither route notarizes the app. That is fine for running it on the machine
+that built it. If you copy it to another Mac, Gatekeeper will quarantine it
+until you notarize the Release build.
 
 ## Private APIs and future compatibility
 
