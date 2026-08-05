@@ -14,6 +14,16 @@ public struct SettingsView: View {
             Toggle("Adjust brightness to content", isOn: $model.isEnabled)
                 .toggleStyle(.switch)
 
+            if let brightness = model.displayBrightness {
+                HStack {
+                    Label("Brightness", systemImage: "sun.max")
+                    Spacer()
+                    Text("\(Int((brightness * 100).rounded()))%")
+                        .fontWeight(.semibold)
+                        .monospacedDigit()
+                }
+            }
+
             if !model.canControlBrightness {
                 Label(
                     "Brightness control is unavailable on this system.",
@@ -30,7 +40,7 @@ public struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Strength")
                 Slider(value: $model.strength, in: 0.2...0.9)
-                Text("How strongly content pulls brightness away from your setting.")
+                Text("Sensitivity to screen content.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

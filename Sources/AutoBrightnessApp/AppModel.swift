@@ -13,6 +13,10 @@ public final class AppModel {
     private var sampler: ScreenSampler?
     private var pauseMonitor: PauseMonitor?
     private var pauseTimer: Timer?
+    /// Keeps the brightness readout honest while nothing else is ticking:
+    /// paused, disabled, or sampler down, the user can still change brightness
+    /// with the hardware keys, and the readout must follow.
+    private var readoutTimer: Timer?
     /// True while the system has told us adjusting is pointless: display asleep,
     /// screen locked, machine suspended.
     private var isSystemPaused = false
@@ -43,6 +47,8 @@ public final class AppModel {
     private var hasRestoredBaseline = false
 
     public private(set) var status: SamplerStatus = .idle
+    /// The panel's actual brightness as last read, or nil when unreadable.
+    public private(set) var displayBrightness: Double?
     public private(set) var luminance: Double = 0.5
     public private(set) var offset: Double = 0
     public private(set) var baseline: Double = 0.5
@@ -160,6 +166,12 @@ public final class AppModel {
             }
         }
 
+        readoutTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshReadouts()
+            }
+        }
+
         applyRunState()
     }
 
@@ -247,6 +259,7 @@ public final class AppModel {
     }
 
     private func refreshReadouts() {
+        displayBrightness = brightness.read()
         luminance = coordinator.lastLuminance
         offset = coordinator.appliedOffset
         baseline = coordinator.baseline
