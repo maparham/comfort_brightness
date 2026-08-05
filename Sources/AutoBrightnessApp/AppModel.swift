@@ -2,7 +2,6 @@ import AppKit
 import AutoBrightnessCore
 import Foundation
 import Observation
-import OSLog
 import ServiceManagement
 
 /// Binds the core coordinator to the sampler, the pause monitor, and the UI.
@@ -161,26 +160,6 @@ public final class AppModel {
 
         coordinator.isEnabled = isEnabled
         baseline = coordinator.baseline
-
-        // Off unless asked for, because it is two lines a second:
-        //   defaults write com.mahmoudparham.AutoBrightness traceTicks -bool YES
-        // The flag is read per tick rather than once here, so it can be turned
-        // on against an already-running app — needing a relaunch to arm the one
-        // diagnostic that explains a live misbehaviour is how the misbehaviour
-        // gets away.
-        // `Logger`, not `NSLog`: NSLog only reaches stderr, which exists when the
-        // binary is started from a shell and is /dev/null when Finder or
-        // LaunchServices starts it — that is, in every way the app is really
-        // used. The interpolation is explicitly public because the unified log
-        // redacts dynamic strings by default, and a trace of `<private>` is no
-        // trace at all.
-        coordinator.trace = { line in
-            guard UserDefaults.standard.bool(forKey: "traceTicks") else { return }
-            Self.log.notice("ABTRACE \(line, privacy: .public)")
-        }
-        Self.log.notice(
-            "ABTRACE ready, tracing is \(defaults.bool(forKey: "traceTicks") ? "on" : "off", privacy: .public)"
-        )
     }
 
     public func start() {
@@ -353,11 +332,6 @@ public final class AppModel {
     /// the clamp cannot drift apart.
     public static let strengthRange: ClosedRange<Double> = 0.2...0.9
     public static let maxOffsetRange: ClosedRange<Double> = 0.05...0.35
-
-    private static let log = Logger(
-        subsystem: "com.mahmoudparham.AutoBrightness",
-        category: "trace"
-    )
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()

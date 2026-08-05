@@ -91,11 +91,6 @@ public final class Coordinator {
     /// a full positive offset drift a full negative one away — twice the limit.
     private var userLevel: Double
 
-    /// Set to trace every tick. Off by default and unset in normal use: this
-    /// fires twice a second, and the only way to tell a real external move from
-    /// the app's own write after the fact is to see the numbers that decided it.
-    public var trace: ((String) -> Void)?
-
     public var settings: ControllerSettings
     public private(set) var baseline: Double
     public private(set) var lastLuminance: Double = 0.5
@@ -165,7 +160,6 @@ public final class Coordinator {
                     probeStillIntervals += 1
                     guard probeStillIntervals >= Self.probeStillIntervalsRequired else {
                         didRefreshAnchor = false
-                        logTick("probe-still", actual: actual)
                         return
                     }
                     // Still, with our hands off it, for two solid seconds: the
@@ -212,7 +206,6 @@ public final class Coordinator {
                 isProbingActuator = true
                 probeStillIntervals = 0
                 didRefreshAnchor = false
-                logTick("probe-bias", actual: actual)
                 return
             } else {
                 externalMovement += movement
@@ -235,7 +228,6 @@ public final class Coordinator {
                         probeStillIntervals = 0
                         lastMovement = movement
                         didRefreshAnchor = false
-                        logTick("probe-repeat", actual: actual)
                         return
                     }
                     followPanel(
@@ -277,7 +269,6 @@ public final class Coordinator {
             lastWritten = actual
             lastRawDiscrepancy = 0
             didRefreshAnchor = true
-            logTick("catch-up", actual: actual)
             return
         }
         // Compare against `actual` when nothing has been written yet, so a scene
@@ -287,11 +278,8 @@ public final class Coordinator {
             lastWritten = target
             lastRawDiscrepancy = 0
             didRefreshAnchor = true
-            let bound = target != requested ? " BOUNDED" : ""
-            logTick("write\(bound)", actual: actual, target: target)
         } else {
             didRefreshAnchor = false
-            logTick("hold", actual: actual, target: target)
         }
     }
 
@@ -308,21 +296,6 @@ public final class Coordinator {
         userLevel = level
     }
 
-    /// One line per tick, naming the branch that decided it and every number
-    /// that branch looked at.
-    private func logTick(_ branch: String, actual: Double, target: Double? = nil) {
-        guard let trace else { return }
-        let last = lastWritten.map { String(format: "%.4f", $0) } ?? "none"
-        let wrote = target.map { String(format: " -> %.4f", $0) } ?? ""
-        trace(
-            String(
-                format: "%-12@ lum=%.3f actual=%.4f last=%@ user=%.4f base=%.4f off=%+.4f ext=%+.4f bias=%+.4f%@",
-                branch, lastLuminance, actual, last, userLevel, baseline,
-                controller.appliedOffset, externalMovement, biasEstimate, wrote
-            )
-        )
-    }
-
     /// Takes the panel's current level as the user's intent, net of the offset we
     /// put there ourselves and of the actuator's measured bias.
     ///
@@ -336,12 +309,6 @@ public final class Coordinator {
         let erased = externalMovement - visibleDisplacement
         adopt(userLevel: actual - biasEstimate + erased, movedThisInterval: movement)
         isCatchingUp = moveBaseline(toward: userLevel - controller.appliedOffset)
-        trace?(
-            String(
-                format: "  adopt: visible=%+.4f erased=%+.4f -> user=%.4f base=%.4f catchup=%@",
-                visibleDisplacement, erased, userLevel, baseline, isCatchingUp ? "yes" : "no"
-            )
-        )
         externalMovement = 0
     }
 
