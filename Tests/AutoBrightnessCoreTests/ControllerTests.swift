@@ -88,6 +88,51 @@ func deadbandHolds() {
     #expect(controller.appliedOffset == 0.0)
 }
 
+@Test("Lowering the clamp by less than the deadband still pulls the offset back")
+func loweredClampBeatsDeadband() {
+    var controller = Controller()
+    _ = settle(&controller, luminance: 0.95)
+    #expect(abs(controller.appliedOffset - (-0.20)) < 1e-6)
+
+    // 0.015 below the applied offset — inside the 0.02 deadband, which must not
+    // shield an offset that now exceeds the user's limit.
+    var settings = ControllerSettings.defaults
+    settings.maxOffset = 0.185
+    for _ in 0..<10 {
+        _ = controller.update(luminance: 0.95, baseline: 0.5, settings: settings)
+    }
+    // Settled exactly at the new clamp — not merely inside it, and not moving.
+    #expect(abs(controller.appliedOffset - (-0.185)) < 1e-6)
+    _ = controller.update(luminance: 0.95, baseline: 0.5, settings: settings)
+    #expect(abs(controller.appliedOffset - (-0.185)) < 1e-6)
+}
+
+@Test("Lowering the clamp pulls a positive offset back too")
+func loweredClampPullsPositiveOffsetBack() {
+    var controller = Controller()
+    _ = settle(&controller, luminance: 0.17)
+    #expect(controller.appliedOffset > 0.13)
+
+    var settings = ControllerSettings.defaults
+    settings.maxOffset = controller.appliedOffset - 0.015
+    for _ in 0..<10 {
+        _ = controller.update(luminance: 0.17, baseline: 0.5, settings: settings)
+    }
+    #expect(controller.appliedOffset <= settings.maxOffset + 1e-9)
+}
+
+@Test("Lowering the clamp eases the offset back at the slew rate, not in one snap")
+func loweredClampSlewsBack() {
+    var controller = Controller()
+    _ = settle(&controller, luminance: 0.95)
+
+    var settings = ControllerSettings.defaults
+    settings.maxOffset = 0.05
+    _ = controller.update(luminance: 0.95, baseline: 0.5, settings: settings)
+    // One tick may move at most slewPerTick from -0.20.
+    #expect(abs(controller.appliedOffset - (-0.15)) < 1e-6)
+}
+
 @Test("Target brightness never leaves the safe range")
 func targetIsClamped() {
     var controller = Controller()

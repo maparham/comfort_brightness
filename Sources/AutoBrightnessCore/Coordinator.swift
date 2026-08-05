@@ -314,8 +314,10 @@ public final class Coordinator {
 
     /// Returns the panel to the user's level and forgets the applied offset.
     public func restoreBaseline() {
-        guard brightness.canControl else { return }
-        if lastWritten != nil {
+        // Only the write is conditional. An actuator that has gone away — the
+        // lid closed on a docked machine — is a reason not to touch hardware,
+        // never a reason to keep a stale offset and anchor on the books.
+        if brightness.canControl, lastWritten != nil {
             brightness.write(baseline)
         }
         lastWritten = nil

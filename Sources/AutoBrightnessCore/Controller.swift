@@ -63,7 +63,10 @@ public struct Controller: Sendable {
         var raw = -settings.strength * (smoothed - settings.neutral)
         raw = min(max(raw, -settings.maxOffset), settings.maxOffset)
 
-        if abs(raw - appliedOffset) >= settings.deadband {
+        // The deadband must not shield an offset that exceeds the clamp — that
+        // happens when the user lowers the limit below what is already applied.
+        let exceedsClamp = abs(appliedOffset) > settings.maxOffset
+        if exceedsClamp || abs(raw - appliedOffset) >= settings.deadband {
             let delta = raw - appliedOffset
             let step = min(max(delta, -settings.slewPerTick), settings.slewPerTick)
             appliedOffset += step
