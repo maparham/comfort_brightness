@@ -37,6 +37,16 @@ public final class Coordinator {
     /// a stepped ramp — which is the shape the ambient controller produces —
     /// cannot fake it.
     static let probeStillIntervalsRequired = 4
+    /// How far the panel must move *in a single interval* before the move is
+    /// read as a person deciding something rather than the ambient sensor
+    /// ramping. A brightness key steps by 1/16 = 0.0625 in one go and a slider
+    /// drag is larger still, while the sensor eases along at 0.020 per tick at
+    /// its fastest. This sits in that gap, and it must be the one-interval
+    /// movement it is compared against rather than an accumulated total —
+    /// a ramp accumulates past any threshold if given enough ticks, and
+    /// re-learning the neutral on a ramp would zero the content offset every few
+    /// seconds and switch the feature off in all but name.
+    static let deliberateChangeThreshold = 0.03
 
     private let brightness: BrightnessControlling
     private var controller = Controller()
@@ -74,6 +84,17 @@ public final class Coordinator {
     private var biasEstimate: Double = 0
     /// True while the baseline is still stepping toward a large external move.
     private var isCatchingUp = false
+    /// The level the user last chose, as they saw it on the panel. "Maximum
+    /// change" is a promise about this number, not about `baseline`: the two
+    /// differ by whatever offset happened to be applied at the moment they
+    /// reached for the keys, so bounding only the offset lets a level set under
+    /// a full positive offset drift a full negative one away — twice the limit.
+    private var userLevel: Double
+
+    /// Set to trace every tick. Off by default and unset in normal use: this
+    /// fires twice a second, and the only way to tell a real external move from
+    /// the app's own write after the fact is to see the numbers that decided it.
+    public var trace: ((String) -> Void)?
 
     public var settings: ControllerSettings
     public private(set) var baseline: Double
@@ -97,7 +118,9 @@ public final class Coordinator {
     public init(brightness: BrightnessControlling, settings: ControllerSettings = .defaults) {
         self.brightness = brightness
         self.settings = settings
-        self.baseline = brightness.read() ?? 0.5
+        let level = brightness.read() ?? 0.5
+        self.baseline = level
+        self.userLevel = level
     }
 
     /// Advances one 2 Hz tick with a freshly measured content luminance.
@@ -114,7 +137,10 @@ public final class Coordinator {
         if isCatchingUp {
             // Still closing a gap opened by a large external move. Keep stepping
             // toward it and keep quiet until we arrive.
-            isCatchingUp = moveBaseline(toward: actual - biasEstimate - controller.appliedOffset)
+            // Mid-gesture: the move that opened this gap was already judged
+            // deliberate when it was first seen, so nothing is re-learned here.
+            adopt(userLevel: actual - biasEstimate, movedThisInterval: 0)
+            isCatchingUp = moveBaseline(toward: userLevel - controller.appliedOffset)
             resetExternalTracking()
         } else if let lastWritten {
             let rawDiscrepancy = actual - lastWritten
@@ -139,6 +165,7 @@ public final class Coordinator {
                     probeStillIntervals += 1
                     guard probeStillIntervals >= Self.probeStillIntervalsRequired else {
                         didRefreshAnchor = false
+                        logTick("probe-still", actual: actual)
                         return
                     }
                     // Still, with our hands off it, for two solid seconds: the
@@ -170,7 +197,11 @@ public final class Coordinator {
                     biasExplained = 0
                     // With the bias now zero, the whole discrepancy is visible
                     // external displacement.
-                    followPanel(actual: actual, visibleDisplacement: rawDiscrepancy)
+                    followPanel(
+                        actual: actual,
+                        visibleDisplacement: rawDiscrepancy,
+                        movement: movement
+                    )
                     lastMovement = movement
                 }
             } else if biasEstimate != 0, biasTrustRemaining <= 0 {
@@ -181,6 +212,7 @@ public final class Coordinator {
                 isProbingActuator = true
                 probeStillIntervals = 0
                 didRefreshAnchor = false
+                logTick("probe-bias", actual: actual)
                 return
             } else {
                 externalMovement += movement
@@ -203,11 +235,13 @@ public final class Coordinator {
                         probeStillIntervals = 0
                         lastMovement = movement
                         didRefreshAnchor = false
+                        logTick("probe-repeat", actual: actual)
                         return
                     }
                     followPanel(
                         actual: actual,
-                        visibleDisplacement: rawDiscrepancy - biasEstimate
+                        visibleDisplacement: rawDiscrepancy - biasEstimate,
+                        movement: movement
                     )
                     lastMovement = movement
                 } else {
@@ -216,14 +250,26 @@ public final class Coordinator {
             }
         } else {
             baseline = actual - biasEstimate
+            userLevel = baseline
             resetExternalTracking()
         }
 
-        let target = controller.update(
+        let requested = controller.update(
             luminance: luminance,
             baseline: baseline,
             settings: settings
         )
+        // The bound the "Maximum change" slider actually names: however the
+        // baseline and the offset combine, the panel may not sit further than
+        // that from the level the user chose. The floor and the panel range are
+        // re-applied afterwards because this bound is measured from a level that
+        // is itself net of the actuator bias, and so can sit outside them —
+        // never driving the panel to black outranks honouring the limit exactly.
+        let bounded = min(
+            max(requested, userLevel - settings.maxOffset),
+            userLevel + settings.maxOffset
+        )
+        let target = min(max(bounded, settings.minBrightness), 1.0)
         // A move too large to absorb in one tick means the user is mid-gesture.
         // Adopt what they have set as the reference and write nothing this tick,
         // so catching up never turns into fighting them.
@@ -231,6 +277,7 @@ public final class Coordinator {
             lastWritten = actual
             lastRawDiscrepancy = 0
             didRefreshAnchor = true
+            logTick("catch-up", actual: actual)
             return
         }
         // Compare against `actual` when nothing has been written yet, so a scene
@@ -240,9 +287,40 @@ public final class Coordinator {
             lastWritten = target
             lastRawDiscrepancy = 0
             didRefreshAnchor = true
+            let bound = target != requested ? " BOUNDED" : ""
+            logTick("write\(bound)", actual: actual, target: target)
         } else {
             didRefreshAnchor = false
+            logTick("hold", actual: actual, target: target)
         }
+    }
+
+    /// Records where the user has put the panel. A move big enough to be a
+    /// deliberate one also re-teaches the controller its neutral: choosing a
+    /// level while looking at something says that level suits that something,
+    /// so the offset restarts from nothing and the chosen level is left alone.
+    /// Smaller moves — the ambient sensor, a read-back artefact — only move the
+    /// level, because re-learning on those would zero the offset continuously.
+    private func adopt(userLevel level: Double, movedThisInterval movement: Double) {
+        if abs(movement) > Self.deliberateChangeThreshold {
+            controller.reneutralize()
+        }
+        userLevel = level
+    }
+
+    /// One line per tick, naming the branch that decided it and every number
+    /// that branch looked at.
+    private func logTick(_ branch: String, actual: Double, target: Double? = nil) {
+        guard let trace else { return }
+        let last = lastWritten.map { String(format: "%.4f", $0) } ?? "none"
+        let wrote = target.map { String(format: " -> %.4f", $0) } ?? ""
+        trace(
+            String(
+                format: "%-12@ lum=%.3f actual=%.4f last=%@ user=%.4f base=%.4f off=%+.4f ext=%+.4f bias=%+.4f%@",
+                branch, lastLuminance, actual, last, userLevel, baseline,
+                controller.appliedOffset, externalMovement, biasEstimate, wrote
+            )
+        )
     }
 
     /// Takes the panel's current level as the user's intent, net of the offset we
@@ -254,10 +332,15 @@ public final class Coordinator {
     /// longer visible is what makes a slow ambient ramp followed in full rather
     /// than a third at a time. When nothing was erased this reduces exactly to
     /// "the panel's level, less our offset".
-    private func followPanel(actual: Double, visibleDisplacement: Double) {
+    private func followPanel(actual: Double, visibleDisplacement: Double, movement: Double) {
         let erased = externalMovement - visibleDisplacement
-        isCatchingUp = moveBaseline(
-            toward: actual - biasEstimate - controller.appliedOffset + erased
+        adopt(userLevel: actual - biasEstimate + erased, movedThisInterval: movement)
+        isCatchingUp = moveBaseline(toward: userLevel - controller.appliedOffset)
+        trace?(
+            String(
+                format: "  adopt: visible=%+.4f erased=%+.4f -> user=%.4f base=%.4f catchup=%@",
+                visibleDisplacement, erased, userLevel, baseline, isCatchingUp ? "yes" : "no"
+            )
         )
         externalMovement = 0
     }
@@ -309,6 +392,7 @@ public final class Coordinator {
             // it, every suspend/resume cycle would re-import the bias into the
             // baseline it was just removed from.
             baseline = actual - biasEstimate
+            userLevel = baseline
         }
     }
 
@@ -325,5 +409,8 @@ public final class Coordinator {
         didRefreshAnchor = false
         isCatchingUp = false
         controller.reset()
+        // The panel has just been handed back to the baseline, so that is where
+        // the user is now: the offset that was on top of it is gone.
+        userLevel = baseline
     }
 }

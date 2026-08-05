@@ -24,9 +24,10 @@ func userAdjustmentRebaselines() {
     fake.externalChange(to: 0.525)
     coordinator.tick(luminance: 0.95)
 
-    // Their adjustment must land exactly where they intended: total brightness
-    // stays at what they set, and the content offset rides on top of it.
-    #expect(abs(coordinator.baseline - 0.725) < 1e-6)
+    // Their adjustment must land exactly where they intended: what they set is
+    // the baseline, and because they set it while looking at this page, this
+    // page becomes the point of no adjustment. Nothing is written back on top.
+    #expect(abs(coordinator.baseline - 0.525) < 1e-6)
     #expect(abs((fake.read() ?? 0) - 0.525) < 1e-6)
 }
 
@@ -318,13 +319,13 @@ func largeJumpIsFollowedGradually() {
     #expect(fake.writes.count == writesBefore)
     #expect(abs((fake.read() ?? 0) - 0.95) < 1e-9)
 
-    // It converges within a couple of seconds: baseline 0.95 - (-0.20) = 1.15,
-    // clamped by the panel range, so total brightness ends up at the user's level
-    // plus the content offset.
+    // It converges within a couple of seconds on the level they dragged to, and
+    // leaves the panel there: the drag also re-taught the app its neutral, so
+    // this page asks for no adjustment at all.
     for _ in 0..<6 {
         coordinator.tick(luminance: 0.95)
     }
-    #expect(coordinator.baseline > 0.95)
+    #expect(abs(coordinator.baseline - 0.95) < 1e-6)
     #expect((fake.read() ?? 0) >= 0.94)
 }
 

@@ -73,6 +73,10 @@ func userChangeStillFollowedThroughRamp() {
         scheduler.pump(20)
     }
 
-    // The 0.1 the user asked for landed in the baseline, not in the offset.
-    #expect(abs(coordinator.baseline - 0.7) < 1e-9)
+    // The 0.1 the user asked for landed in the baseline, not in the offset: the
+    // panel was at 0.42, they moved it to 0.52, and 0.52 is what the app now
+    // takes as their level. It also treats this page as the point of no
+    // adjustment, so nothing is written back on top of their press.
+    #expect(abs(coordinator.baseline - 0.52) < 1e-9)
+    #expect(abs((fake.read() ?? 0) - 0.52) < 1e-9)
 }

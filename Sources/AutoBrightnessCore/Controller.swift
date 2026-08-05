@@ -45,6 +45,11 @@ public struct Controller: Sendable {
 
     public private(set) var appliedOffset: Double = 0
     private var history: [Double] = []
+    /// The content luminance the user last set their brightness against, once
+    /// they have set it by hand. Choosing a level while looking at something is
+    /// a statement that the level suits that something, which is a better point
+    /// of no adjustment than a fixed mid-grey guess.
+    private var learnedNeutral: Double?
 
     public init() {}
 
@@ -60,7 +65,7 @@ public struct Controller: Sendable {
         }
         let smoothed = Self.median(history)
 
-        var raw = -settings.strength * (smoothed - settings.neutral)
+        var raw = -settings.strength * (smoothed - (learnedNeutral ?? settings.neutral))
         raw = min(max(raw, -settings.maxOffset), settings.maxOffset)
 
         // The deadband must not shield an offset that exceeds the clamp — that
@@ -75,11 +80,25 @@ public struct Controller: Sendable {
         return min(max(baseline + appliedOffset, settings.minBrightness), 1.0)
     }
 
+    /// Takes what is on screen now as the point of no adjustment and drops the
+    /// offset to nothing, so the level the user just chose is left exactly as
+    /// they chose it and the next adjustment is measured from there.
+    public mutating func reneutralize() {
+        learnedNeutral = history.isEmpty ? nil : Self.median(history)
+        appliedOffset = 0
+    }
+
     /// Drops the offset and the history. Used on resume, so the app ramps in from
     /// the user's current level rather than snapping to a stale offset.
+    ///
+    /// The learned neutral goes too, unlike the coordinator's actuator bias: a
+    /// bias describes the hardware and stays true across a sleep, but a neutral
+    /// describes what was on screen at one moment, and that is exactly what a
+    /// sleep or a disable makes stale.
     public mutating func reset() {
         appliedOffset = 0
         history.removeAll()
+        learnedNeutral = nil
     }
 
     /// Upper median of the sample history.

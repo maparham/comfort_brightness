@@ -160,6 +160,21 @@ public final class AppModel {
 
         coordinator.isEnabled = isEnabled
         baseline = coordinator.baseline
+
+        // Off unless asked for, because it is two lines a second:
+        //   defaults write com.mahmoudparham.AutoBrightness traceTicks -bool YES
+        // The flag is read per tick rather than once here, so it can be turned
+        // on against an already-running app — needing a relaunch to arm the one
+        // diagnostic that explains a live misbehaviour is how the misbehaviour
+        // gets away.
+        coordinator.trace = { line in
+            guard UserDefaults.standard.bool(forKey: "traceTicks") else { return }
+            NSLog("ABTRACE %@", line)
+        }
+        NSLog(
+            "ABTRACE ready, tracing is %@",
+            defaults.bool(forKey: "traceTicks") ? "on" : "off (defaults write com.mahmoudparham.AutoBrightness traceTicks -bool YES)"
+        )
     }
 
     public func start() {
