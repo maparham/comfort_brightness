@@ -11,6 +11,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/AutoBrightnessApp "$APP/Contents/MacOS/AutoBrightness"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/Icon/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # Ad-hoc signature. macOS ties Screen Recording permission to the code signature,
 # so a rebuild can re-trigger the permission prompt. If that becomes tiresome,

@@ -27,6 +27,8 @@ targets:
       # Only the shell. The engine arrives via the package dependency below, so
       # there is exactly one copy of it compiled into the app.
       - path: Sources/AutoBrightnessApp
+      - path: Resources/Icon/AppIcon.icns
+        buildPhase: resources
 
     dependencies:
       - package: AutoBrightness

@@ -10,6 +10,8 @@
     <string>com.mahmoudparham.AutoBrightness</string>
     <key>CFBundleExecutable</key>
     <string>AutoBrightness</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
