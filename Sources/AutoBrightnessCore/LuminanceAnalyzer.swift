@@ -11,15 +11,22 @@ public enum LuminanceAnalyzer {
     static let percentileFraction = 0.75
 
     /// Per-pixel linear luminance, row-major.
+    ///
+    /// A buffer that is not exactly `width * height * 4` bytes is rejected
+    /// outright rather than measured as far as it goes. Filling the shortfall
+    /// with zeros would not be a partial reading: it would put a black region
+    /// against one edge of the frame, which reads as a dark screen and can trip
+    /// the letterbox crop on top of that. `analyze` treats the empty map as
+    /// "no information" and returns its neutral value.
     public static func luminanceMap(_ frame: Frame) -> [[Double]] {
-        guard frame.width > 0, frame.height > 0 else { return [] }
+        guard frame.width > 0, frame.height > 0,
+              frame.bgra.count == frame.width * frame.height * 4 else { return [] }
         var map: [[Double]] = []
         map.reserveCapacity(frame.height)
         for row in 0..<frame.height {
             var values = [Double](repeating: 0, count: frame.width)
             for col in 0..<frame.width {
                 let index = (row * frame.width + col) * 4
-                guard index + 2 < frame.bgra.count else { break }
                 values[col] = Luminance.relative(
                     r: frame.bgra[index + 2],
                     g: frame.bgra[index + 1],
@@ -53,6 +60,13 @@ public enum LuminanceAnalyzer {
         // Back to perceptual space. The controller compares against a neutral
         // point and applies a gain, and both of those are only meaningful
         // perceptually.
+        //
+        // A plain 2.2 gamma, deliberately, even though the decode above used the
+        // exact piecewise sRGB curve. This is not the inverse of that transfer
+        // function and is not trying to be: the decode has to be exact because
+        // the average is taken in linear light, whereas this is only a
+        // perceptual re-scaling for the control law, whose neutral point and
+        // gain were tuned against this curve.
         return pow(max(linear, 0), 1.0 / 2.2)
     }
 }
