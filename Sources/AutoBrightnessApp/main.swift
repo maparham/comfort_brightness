@@ -59,10 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = "\(Int((brightness * 100).rounded()))%"
         } else {
             button.title = ""
-            button.image = NSImage(
-                systemSymbolName: "sun.max",
-                accessibilityDescription: "Auto Brightness"
-            )
+            button.image = makeStatusGlyph()
         }
     }
 
