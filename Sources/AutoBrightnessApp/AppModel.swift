@@ -77,6 +77,16 @@ public final class AppModel {
         }
     }
 
+    /// Whether the menu bar shows the app's glyph next to the brightness
+    /// percentage. Hiding it leaves the percentage alone as the click target;
+    /// `updateStatusItem` shows the glyph anyway when there is no percentage to
+    /// show, so the status item can never end up empty and unclickable.
+    public var showsMenuBarIcon: Bool {
+        didSet {
+            UserDefaults.standard.set(showsMenuBarIcon, forKey: "showsMenuBarIcon")
+        }
+    }
+
     public var launchAtLogin: Bool {
         didSet {
             do {
@@ -95,6 +105,7 @@ public final class AppModel {
         let defaults = UserDefaults.standard
         defaults.register(defaults: [
             "isEnabled": true,
+            "showsMenuBarIcon": true,
             "strength": ControllerSettings.defaults.strength,
             "maxOffset": ControllerSettings.defaults.maxOffset,
         ])
@@ -112,6 +123,7 @@ public final class AppModel {
         coordinator = Coordinator(brightness: brightness, settings: settings)
 
         isEnabled = defaults.bool(forKey: "isEnabled")
+        showsMenuBarIcon = defaults.bool(forKey: "showsMenuBarIcon")
         strength = settings.strength
         maxOffset = settings.maxOffset
         launchAtLogin = SMAppService.mainApp.status == .enabled

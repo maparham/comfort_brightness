@@ -66,6 +66,8 @@ public struct SettingsView: View {
                 Button("Pause for 1 hour", action: model.pauseForAnHour)
             }
 
+            Toggle("Show icon in menu bar", isOn: $model.showsMenuBarIcon)
+
             Toggle("Open at login", isOn: $model.launchAtLogin)
 
             DisclosureGroup("Details", isExpanded: $showDebug) {

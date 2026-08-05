@@ -41,26 +41,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.prepareForTermination()
     }
 
-    /// Shows the panel's brightness as a percentage, falling back to the sun
-    /// icon when it cannot be read (no built-in panel, clamshell, symbols
-    /// gone). `withObservationTracking` fires once per change, so each update
-    /// re-arms it.
+    /// Shows the app glyph and the panel's brightness as a percentage. The
+    /// glyph is hidden when the user turns it off, and the percentage is
+    /// dropped when brightness cannot be read (no built-in panel, clamshell,
+    /// symbols gone). `withObservationTracking` fires once per change, so each
+    /// update re-arms it.
     private func updateStatusItem() {
         guard let button = statusItem?.button else { return }
-        let brightness = withObservationTracking {
-            model.displayBrightness
+        let (brightness, showsIcon) = withObservationTracking {
+            (model.displayBrightness, model.showsMenuBarIcon)
         } onChange: {
             Task { @MainActor [weak self] in
                 self?.updateStatusItem()
             }
         }
-        if let brightness {
-            button.image = nil
-            button.title = "\(Int((brightness * 100).rounded()))%"
-        } else {
-            button.title = ""
-            button.image = makeStatusGlyph()
-        }
+        // The glyph is unconditional when there is no percentage: a status item
+        // with neither image nor title collapses to nothing the user can click.
+        button.image = (showsIcon || brightness == nil) ? makeStatusGlyph() : nil
+        button.title = brightness.map { "\(Int(($0 * 100).rounded()))%" } ?? ""
     }
 
     @objc private func togglePopover() {
