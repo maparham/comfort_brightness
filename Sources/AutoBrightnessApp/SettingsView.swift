@@ -14,13 +14,23 @@ public struct SettingsView: View {
             Toggle("Adjust brightness to content", isOn: $model.isEnabled)
                 .toggleStyle(.switch)
 
-            if let brightness = model.displayBrightness {
-                HStack {
+            HStack {
+                if let brightness = model.displayBrightness {
                     Label("Brightness", systemImage: "sun.max")
-                    Spacer()
                     Text("\(Int((brightness * 100).rounded()))%")
                         .fontWeight(.semibold)
                         .monospacedDigit()
+                }
+                Spacer()
+                // Shown whether or not the app is enabled: a user who pauses and
+                // then switches the toggle off must still be able to see that a
+                // pause is in effect, and cancel it.
+                if let label = model.pausedUntilLabel {
+                    Text("Paused until \(label)")
+                        .font(.caption)
+                    Button("Resume", action: model.endPause)
+                } else if model.isEnabled {
+                    Button("Pause for 1 hour", action: model.pauseForAnHour)
                 }
             }
 
@@ -38,37 +48,29 @@ public struct SettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Strength")
-                Slider(value: $model.strength, in: 0.2...0.9)
-                Text("Sensitivity to screen content.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Sensitivity to screen content: \(Int(model.strength * 100))%")
+                Slider(value: $model.strength, in: AppModel.strengthRange)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Maximum change: \(Int(model.maxOffset * 100))%")
-                Slider(value: $model.maxOffset, in: 0.05...0.35)
+                Slider(value: $model.maxOffset, in: AppModel.maxOffsetRange)
             }
 
             Divider()
 
-            // Shown whether or not the app is enabled: a user who pauses and then
-            // switches the toggle off must still be able to see that a pause is
-            // in effect, and cancel it.
-            if let label = model.pausedUntilLabel {
-                HStack {
-                    Text("Paused until \(label)")
-                        .font(.caption)
-                    Spacer()
-                    Button("Resume", action: model.endPause)
-                }
-            } else if model.isEnabled {
-                Button("Pause for 1 hour", action: model.pauseForAnHour)
-            }
-
             Toggle("Show icon in menu bar", isOn: $model.showsMenuBarIcon)
 
             Toggle("Open at login", isOn: $model.launchAtLogin)
+
+            // The toggle has already snapped back to what the system reports,
+            // so without this the failure would look like a switch that
+            // silently refuses to move.
+            if let error = model.launchAtLoginError {
+                Text("Could not change the login item: \(error)")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
 
             DisclosureGroup("Details", isExpanded: $showDebug) {
                 VStack(alignment: .leading, spacing: 2) {
