@@ -27,8 +27,9 @@ wires it in. The `Coordinator` is unchanged.
   - Read the panel's current level. If the read fails, write `target` directly
     (never drop a write). If `|target - current| < 0.01` (already
     imperceptible), write directly.
-  - Otherwise emit ~24 interpolated writes over ~350 ms on a 60 Hz timer on the
-    main run loop, ease-in-out, final step exactly `target`.
+  - Otherwise emit 20 interpolated writes over ~333 ms on a 60 Hz timer on the
+    main run loop (scheduled in common modes, so event tracking cannot freeze
+    a ramp mid-flight), ease-in-out, final step exactly `target`.
 - `read()` / `canControl`: forward to the wrapped control.
 - `flush()`: cancel the timer and synchronously write the pending final target.
 
@@ -36,9 +37,10 @@ wires it in. The `Coordinator` is unchanged.
 
 The `Coordinator` attributes `read() - lastWritten` to external causes (user,
 ambient sensor). Every ramp must therefore complete before the next tick's
-read. 350 ms < the ~500 ms between one tick's write and the next tick's read,
-so reads at tick boundaries always see the settled value. Probe ticks write
-nothing, so the ramper is idle during probes.
+read. 333 ms < the ~500 ms between one tick's write and the next tick's read,
+so reads at tick boundaries always see the settled value (enforced by a
+precondition on `stepCount * stepInterval`). Probe ticks write nothing, so the
+ramper is idle during probes.
 
 ### Termination
 
@@ -52,8 +54,9 @@ like any other.
 - `AutoBrightnessCore/BrightnessRamp.swift`: pure step generator — given
   (start, target, step count), returns the eased intermediate values. Fully
   unit-testable.
-- `AutoBrightnessApp/RampingBrightness.swift`: the decorator; owns the timer,
-  drives the generator, forwards reads.
+- `AutoBrightnessCore/RampingBrightness.swift`: the decorator, on a
+  `RampScheduling` abstraction so tests can pump it by hand;
+  `AutoBrightnessApp/TimerRampScheduler.swift` supplies the real timer.
 - `AppModel`: construct `RampingBrightness(wrapping: DisplayServicesBrightness)`,
   pass to `Coordinator`, call `flush()` on termination.
 

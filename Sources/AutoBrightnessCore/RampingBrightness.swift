@@ -29,6 +29,10 @@ public final class RampingBrightness: BrightnessControlling, @unchecked Sendable
         stepCount: Int = 20,
         stepInterval: TimeInterval = 1.0 / 60.0
     ) {
+        precondition(
+            Double(stepCount) * stepInterval < 0.5,
+            "a ramp must finish inside one 2 Hz tick or the Coordinator misreads it as user input"
+        )
         self.wrapped = wrapping
         self.scheduler = scheduler
         self.stepCount = stepCount
