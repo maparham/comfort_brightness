@@ -15,10 +15,9 @@ let package = Package(
             name: "AutoBrightnessApp",
             dependencies: ["AutoBrightnessCore"]
         ),
-        .executableTarget(
-            name: "ALSProbe",
-            dependencies: ["AutoBrightnessCore"]
-        ),
+        // No dependency on the core: the probe resolves the two symbols it needs
+        // itself, precisely so it stays runnable in isolation.
+        .executableTarget(name: "ALSProbe"),
         .testTarget(
             name: "AutoBrightnessCoreTests",
             dependencies: ["AutoBrightnessCore"]
