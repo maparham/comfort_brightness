@@ -8,7 +8,7 @@ import ServiceManagement
 @MainActor
 @Observable
 public final class AppModel {
-    private let brightness: DisplayServicesBrightness
+    private let brightness: RampingBrightness
     private let coordinator: Coordinator
     private var sampler: ScreenSampler?
     private var pauseMonitor: PauseMonitor?
@@ -97,7 +97,10 @@ public final class AppModel {
         settings.strength = defaults.double(forKey: "strength")
         settings.maxOffset = defaults.double(forKey: "maxOffset")
 
-        let brightness = DisplayServicesBrightness()
+        let brightness = RampingBrightness(
+            wrapping: DisplayServicesBrightness(),
+            scheduler: TimerRampScheduler()
+        )
         self.brightness = brightness
         canControlBrightness = brightness.canControl
         coordinator = Coordinator(brightness: brightness, settings: settings)
@@ -238,6 +241,9 @@ public final class AppModel {
         guard !hasRestoredBaseline else { return }
         hasRestoredBaseline = true
         coordinator.restoreBaseline()
+        // The restore write itself starts a glide; landing it synchronously is
+        // what keeps process exit from stranding the panel mid-ramp.
+        brightness.flush()
     }
 
     private func refreshReadouts() {
