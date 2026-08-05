@@ -41,6 +41,16 @@ public final class AppModel {
     /// — without this flag, a system wake or a disable/re-enable would silently
     /// cancel a manual pause early.
     private var isManuallyPaused = false
+    /// When the manual pause is due to end. The `Timer` alone cannot be trusted
+    /// with this: it does not fire while the machine is asleep and comes back
+    /// late by however long the sleep lasted, so a pause taken at 14:00 and
+    /// labelled "until 15:00" would really run to 18:00 after a three-hour lid
+    /// close. The deadline is the truth; the timer only saves us from polling
+    /// when nothing interrupts it.
+    private var pauseDeadline: Date?
+    /// Suppresses the `launchAtLogin` `didSet` while it is reverting itself
+    /// after a failed registration.
+    private var isRevertingLaunchAtLogin = false
     /// Guards the restore-and-terminate sequence so it runs exactly once
     /// whether it is entered via the Quit button or via
     /// `applicationWillTerminate` (logout, Activity Monitor, etc).
@@ -54,6 +64,10 @@ public final class AppModel {
     public private(set) var baseline: Double = 0.5
     public private(set) var pausedUntilLabel: String?
     public private(set) var canControlBrightness: Bool
+    /// Set when registering or unregistering the login item failed, so the UI
+    /// can say so rather than leave a switch showing a state that was never
+    /// achieved.
+    public private(set) var launchAtLoginError: String?
 
     public var isEnabled: Bool {
         didSet {
@@ -89,14 +103,26 @@ public final class AppModel {
 
     public var launchAtLogin: Bool {
         didSet {
+            // The revert below assigns to this property; without the guard it
+            // would re-enter and try to register all over again.
+            guard !isRevertingLaunchAtLogin else { return }
             do {
                 if launchAtLogin {
                     try SMAppService.mainApp.register()
                 } else {
                     try SMAppService.mainApp.unregister()
                 }
+                launchAtLoginError = nil
             } catch {
                 NSLog("launch at login failed: \(error.localizedDescription)")
+                // Registration genuinely fails when the app is not in a
+                // launchable location. Leaving the switch on would claim
+                // something that never happened, so put it back where the
+                // system says it actually is.
+                launchAtLoginError = error.localizedDescription
+                isRevertingLaunchAtLogin = true
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+                isRevertingLaunchAtLogin = false
             }
         }
     }
@@ -110,9 +136,13 @@ public final class AppModel {
             "maxOffset": ControllerSettings.defaults.maxOffset,
         ])
 
+        // Clamped, not trusted: the sliders bound what a user can choose, but a
+        // value carried over from an older build or edited by hand is not
+        // bounded by anything, and an out-of-range strength would drive the
+        // control law well past what was ever tuned for.
         var settings = ControllerSettings.defaults
-        settings.strength = defaults.double(forKey: "strength")
-        settings.maxOffset = defaults.double(forKey: "maxOffset")
+        settings.strength = Self.strengthRange.clamping(defaults.double(forKey: "strength"))
+        settings.maxOffset = Self.maxOffsetRange.clamping(defaults.double(forKey: "maxOffset"))
 
         let brightness = RampingBrightness(
             wrapping: DisplayServicesBrightness(),
@@ -180,7 +210,11 @@ public final class AppModel {
 
         readoutTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.refreshReadouts()
+                guard let self else { return }
+                // Also the backstop for an expired pause, for the wake that
+                // arrives without a notification we observe.
+                guard !self.endPauseIfExpired() else { return }
+                self.refreshReadouts()
             }
         }
 
@@ -196,10 +230,10 @@ public final class AppModel {
 
     /// Stops adjusting for an hour, then resumes on its own.
     public func pauseForAnHour() {
+        let deadline = Date().addingTimeInterval(3600)
         isManuallyPaused = true
-        pausedUntilLabel = Self.timeFormatter.string(
-            from: Date().addingTimeInterval(3600)
-        )
+        pauseDeadline = deadline
+        pausedUntilLabel = Self.timeFormatter.string(from: deadline)
         pauseTimer?.invalidate()
         pauseTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -211,10 +245,22 @@ public final class AppModel {
 
     public func endPause() {
         isManuallyPaused = false
+        pauseDeadline = nil
         pauseTimer?.invalidate()
         pauseTimer = nil
         pausedUntilLabel = nil
         applyRunState()
+    }
+
+    /// Ends a manual pause whose deadline has already passed, which is what
+    /// covers the case the timer cannot: it does not run while the machine is
+    /// asleep. Returns true when it ended one — `endPause` re-applies the run
+    /// state itself, so the caller has nothing left to do.
+    @discardableResult
+    private func endPauseIfExpired() -> Bool {
+        guard let pauseDeadline, Date() >= pauseDeadline else { return false }
+        endPause()
+        return true
     }
 
     /// The single place that decides whether the app is watching the screen and
@@ -222,6 +268,10 @@ public final class AppModel {
     /// sleep, sampler health — funnels through here, so the two can never
     /// disagree (capturing while disabled, or adjusting on a frozen measurement).
     private func applyRunState() {
+        // Waking from sleep lands here, and it is the one moment an expired
+        // pause is most likely to be sitting unnoticed. `endPause` re-enters
+        // this method with the deadline already cleared, so this cannot loop.
+        if endPauseIfExpired() { return }
         canControlBrightness = brightness.canControl
         let userWantsIt = isEnabled && !isManuallyPaused && !isSystemPaused
 
@@ -277,9 +327,21 @@ public final class AppModel {
         baseline = coordinator.baseline
     }
 
+    /// The ranges the sliders offer and the only ranges the stored settings are
+    /// allowed to take. Declared here rather than in the view so the bound and
+    /// the clamp cannot drift apart.
+    public static let strengthRange: ClosedRange<Double> = 0.2...0.9
+    public static let maxOffsetRange: ClosedRange<Double> = 0.05...0.35
+
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private extension ClosedRange where Bound == Double {
+    func clamping(_ value: Double) -> Double {
+        Swift.min(Swift.max(value, lowerBound), upperBound)
+    }
 }

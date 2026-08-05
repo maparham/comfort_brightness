@@ -348,13 +348,16 @@ extension ScreenSampler: SCStreamOutput {
         let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
         let pointer = base.assumingMemoryBound(to: UInt8.self)
 
+        let rowBytes = width * 4
+        guard bytesPerRow >= rowBytes else { return nil }
+
         var bgra = [UInt8]()
         bgra.reserveCapacity(width * height * 4)
         for row in 0..<height {
-            let start = row * bytesPerRow
-            for column in 0..<(width * 4) {
-                bgra.append(pointer[start + column])
-            }
+            bgra.append(contentsOf: UnsafeBufferPointer(
+                start: pointer + row * bytesPerRow,
+                count: rowBytes
+            ))
         }
         return Frame(width: width, height: height, bgra: bgra)
     }
