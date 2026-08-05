@@ -135,29 +135,14 @@ extra prompt the first time you build Release.
 The Swift package remains the source of truth for the engine and its tests —
 `swift test` runs the full suite and does not require Xcode.
 
-### Standalone script
-
-```bash
-Scripts/make-bundle.sh
-cp -R AutoBrightness.app /Applications/
-open /Applications/AutoBrightness.app
-```
-
-This builds a release binary, assembles `AutoBrightness.app` in the repository
-root, and **ad-hoc** signs it — no developer certificate needed. The trade-off
-is that an ad-hoc signature changes on every build, so **macOS may ask you to
-re-grant Screen Recording permission after each rebuild**. Use this route if
-you do not have a developer certificate, or for a machine that does not have
-Xcode installed.
-
-### Either way
+### Running it
 
 The app runs as a menu bar accessory with no Dock icon. On first launch it
 prompts for Screen Recording permission; grant it in System Settings >
 Privacy & Security > Screen Recording, then quit and reopen the app — macOS
 generally does not hand a running process a capture grant it started without.
 
-Neither route notarizes the app. That is fine for running it on the machine
+The build is not notarized. That is fine for running it on the machine
 that built it. If you copy it to another Mac, Gatekeeper will quarantine it
 until you notarize the Release build.
 
