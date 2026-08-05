@@ -11,6 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The way back in when the status item is not in the menu bar. Held rather
     /// than rebuilt so reopening twice does not stack windows.
     private var settingsWindow: NSWindow?
+    /// The pending re-check for a status item macOS is not currently showing.
+    /// Held so a stale chain can be cancelled rather than left to run alongside
+    /// a newer one.
+    private var statusItemRetry: Task<Void, Never>?
     private let model = AppModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -85,8 +89,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// dropped when brightness cannot be read (no built-in panel, clamshell,
     /// symbols gone). `withObservationTracking` fires once per change, so each
     /// update re-arms it.
+    ///
+    /// Nothing here may return without leaving exactly one thing pending — an
+    /// observation or a retry. This is the only thing that schedules the next
+    /// update, so a path that leaves none freezes the status item on whatever
+    /// it last showed, permanently rather than until the next change; and a
+    /// path that leaves two makes the pending updates accumulate for as long
+    /// as that path keeps being taken.
     private func updateStatusItem() {
-        guard let button = statusItem?.button else { return }
+        // A status item has no button while macOS is not showing it — evicted
+        // for want of menu-bar room, for one. Retrying rather than giving up is
+        // what lets the item come back when the room does; observation would
+        // not, since eviction is not a model change. Deliberately without
+        // arming the observation as well: that is the second pending update
+        // the note above rules out.
+        guard let button = statusItem?.button else {
+            // An observation armed before the item went away can land here too,
+            // so this replaces the pending retry rather than adding to it.
+            statusItemRetry?.cancel()
+            statusItemRetry = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                self?.updateStatusItem()
+            }
+            return
+        }
+        // Reaching the button means any retry chain has served its purpose.
+        statusItemRetry?.cancel()
+        statusItemRetry = nil
         let (brightness, showsIcon) = withObservationTracking {
             (model.displayBrightness, model.showsMenuBarIcon)
         } onChange: {
