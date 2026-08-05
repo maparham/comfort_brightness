@@ -41,7 +41,13 @@ public final class RampingBrightness: BrightnessControlling, @unchecked Sendable
 
     public var canControl: Bool { wrapped.canControl }
 
-    public func read() -> Double? { wrapped.read() }
+    /// While a ramp is in flight the target — not the step the panel happens to
+    /// be sitting on — is the truthful answer to "where is this panel". The
+    /// glide is ours and it is already committed, so reporting an intermediate
+    /// step would make the `Coordinator` read a shortfall from its own last
+    /// write as user input if the run loop ever ran late, and would make the
+    /// menu-bar readout flicker through every step of every glide.
+    public func read() -> Double? { pendingTarget ?? wrapped.read() }
 
     public func write(_ value: Double) {
         cancelRamp()
