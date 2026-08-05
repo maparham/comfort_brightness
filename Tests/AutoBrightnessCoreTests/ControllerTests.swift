@@ -129,8 +129,9 @@ func loweredClampSlewsBack() {
     var settings = ControllerSettings.defaults
     settings.maxOffset = 0.05
     _ = controller.update(luminance: 0.95, baseline: 0.5, settings: settings)
-    // One tick may move at most slewPerTick from -0.20.
-    #expect(abs(controller.appliedOffset - (-0.15)) < 1e-6)
+    // One tick may move at most slewPerTick from -0.20, and the slew is sized to
+    // the clamp: at a 0.05 clamp and the default 2 s that is 0.05 / (2 * 2 Hz).
+    #expect(abs(controller.appliedOffset - (-0.1875)) < 1e-6)
 }
 
 @Test("Target brightness never leaves the safe range")

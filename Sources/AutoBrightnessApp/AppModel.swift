@@ -91,6 +91,37 @@ public final class AppModel {
         }
     }
 
+    public var responseSeconds: Double {
+        didSet {
+            coordinator.settings.responseSeconds = responseSeconds
+            UserDefaults.standard.set(responseSeconds, forKey: "responseSeconds")
+        }
+    }
+
+    /// True when the three tuning sliders already sit at the values the app
+    /// ships with, so the reset button can show there is nothing to undo rather
+    /// than looking like a button that did nothing.
+    public var isAtDefaultTuning: Bool {
+        strength == ControllerSettings.defaults.strength
+            && maxOffset == ControllerSettings.defaults.maxOffset
+            && responseSeconds == ControllerSettings.defaults.responseSeconds
+    }
+
+    /// Puts the tuning sliders back to what the app ships with. Each property's
+    /// `didSet` carries the value through to the coordinator and to
+    /// `UserDefaults`, so there is nothing else to keep in step here.
+    ///
+    /// The toggles are deliberately left alone. Enabling, the menu bar icon and
+    /// the login item are states the user chose rather than tuning they would
+    /// want undone, and the last of the three registers with the system —
+    /// unregistering it from a button labelled "reset" would reach outside the
+    /// app for something the user did not ask to change.
+    public func resetTuning() {
+        strength = ControllerSettings.defaults.strength
+        maxOffset = ControllerSettings.defaults.maxOffset
+        responseSeconds = ControllerSettings.defaults.responseSeconds
+    }
+
     /// Whether the menu bar shows the app's glyph next to the brightness
     /// percentage. Hiding it leaves the percentage alone as the click target;
     /// `updateStatusItem` shows the glyph anyway when there is no percentage to
@@ -134,6 +165,7 @@ public final class AppModel {
             "showsMenuBarIcon": true,
             "strength": ControllerSettings.defaults.strength,
             "maxOffset": ControllerSettings.defaults.maxOffset,
+            "responseSeconds": ControllerSettings.defaults.responseSeconds,
         ])
 
         // Clamped, not trusted: the sliders bound what a user can choose, but a
@@ -143,6 +175,9 @@ public final class AppModel {
         var settings = ControllerSettings.defaults
         settings.strength = Self.strengthRange.clamping(defaults.double(forKey: "strength"))
         settings.maxOffset = Self.maxOffsetRange.clamping(defaults.double(forKey: "maxOffset"))
+        settings.responseSeconds = Self.responseSecondsRange.clamping(
+            defaults.double(forKey: "responseSeconds")
+        )
 
         let brightness = RampingBrightness(
             wrapping: DisplayServicesBrightness(),
@@ -156,6 +191,7 @@ public final class AppModel {
         showsMenuBarIcon = defaults.bool(forKey: "showsMenuBarIcon")
         strength = settings.strength
         maxOffset = settings.maxOffset
+        responseSeconds = settings.responseSeconds
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
         coordinator.isEnabled = isEnabled
@@ -332,6 +368,7 @@ public final class AppModel {
     /// the clamp cannot drift apart.
     public static let strengthRange: ClosedRange<Double> = 0.2...0.9
     public static let maxOffsetRange: ClosedRange<Double> = 0.05...0.35
+    public static let responseSecondsRange: ClosedRange<Double> = 1.0...8.0
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()

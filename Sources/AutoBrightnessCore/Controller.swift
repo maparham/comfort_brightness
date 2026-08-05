@@ -12,24 +12,51 @@ public struct ControllerSettings: Sendable, Equatable, Codable {
     /// Changes smaller than this are ignored entirely, which is what stops slow
     /// oscillation around a steady scene.
     public var deadband: Double
-    /// Maximum offset movement per tick. At 2 Hz, 0.05 is 0.10 per second.
-    public var slewPerTick: Double
+    /// How long a full-size adjustment takes to arrive, in seconds. One knob for
+    /// the two things that make an adjustment feel abrupt: how big a step the
+    /// offset may take each tick, and how long new content must hold before it is
+    /// believed at all. Both are derived from it below.
+    public var responseSeconds: Double
     /// Floor, so the panel is never driven to black.
     public var minBrightness: Double
+
+    /// The rate the sampler delivers frames at, and so the rate the control law
+    /// ticks at. Not a setting: it is a property of the capture configuration.
+    static let tickRate = 2.0
+
+    /// Guards the derivations below against a zero or negative value arriving
+    /// from a decoded or hand-edited setting, which would otherwise divide by
+    /// zero and freeze the offset.
+    private var seconds: Double { Swift.max(responseSeconds, 0.5) }
+
+    /// Maximum offset movement per tick, sized so a full-size adjustment lands in
+    /// `responseSeconds` whatever the clamp is set to. A smaller `maxOffset`
+    /// therefore takes smaller steps rather than arriving sooner: the setting is
+    /// how long an adjustment takes, not how fast the panel moves.
+    public var slewPerTick: Double { maxOffset / (seconds * Self.tickRate) }
+
+    /// Number of samples the median is taken over. A change must hold for more
+    /// than half of them before it moves the offset at all, which is what makes a
+    /// quick flick through a bright window cost nothing. Three samples at 2 Hz is
+    /// 1.5 seconds, enough to absorb scrolling past a bright image; the floor
+    /// keeps that much rejection even at the shortest setting.
+    public var historyLength: Int {
+        Swift.min(Swift.max(Int((seconds * 1.5).rounded()), 3), 12)
+    }
 
     public init(
         strength: Double = 0.45,
         maxOffset: Double = 0.20,
         neutral: Double = 0.50,
         deadband: Double = 0.02,
-        slewPerTick: Double = 0.05,
+        responseSeconds: Double = 2.0,
         minBrightness: Double = 0.05
     ) {
         self.strength = strength
         self.maxOffset = maxOffset
         self.neutral = neutral
         self.deadband = deadband
-        self.slewPerTick = slewPerTick
+        self.responseSeconds = responseSeconds
         self.minBrightness = minBrightness
     }
 
@@ -39,10 +66,6 @@ public struct ControllerSettings: Sendable, Equatable, Codable {
 /// The control law. Pure: every input is a value, and the only state is the
 /// applied offset plus a short sample history.
 public struct Controller: Sendable {
-    /// Number of samples the median is taken over. Three samples at 2 Hz is 1.5
-    /// seconds, enough to absorb scrolling past a bright image.
-    static let historyLength = 3
-
     public private(set) var appliedOffset: Double = 0
     private var history: [Double] = []
     /// The content luminance the user last set their brightness against, once
@@ -60,7 +83,9 @@ public struct Controller: Sendable {
         settings: ControllerSettings
     ) -> Double {
         history.append(luminance)
-        if history.count > Self.historyLength {
+        // A loop, not a single drop: shortening the setting must take effect on
+        // the next tick rather than decaying one stale sample at a time.
+        while history.count > settings.historyLength {
             history.removeFirst()
         }
         let smoothed = Self.median(history)

@@ -26,7 +26,7 @@ pillarbox bars cropped out so the adjustment is sized to the picture rather
 than to the black frame around it) and applies a bounded adjustment on top
 of that baseline: brighter
 for dark content, dimmer for bright content, by default no more than ±20%,
-ramping in over roughly 2 seconds so it never jumps.
+ramping in over roughly 2 seconds — adjustable up to 8 seconds — so it never jumps.
 
 A dark theme is not a dark video, and the two are not treated alike: the bar
 crop only fires on genuinely black bars at opposing edges of the frame, so a
@@ -173,6 +173,13 @@ Click the menu bar icon to open the settings popover:
   offset.
 - **Maximum change** — the clamp on how far the offset can move the panel
   from baseline (default ±20%).
+- **Time to adjust** — how long an adjustment takes to arrive
+  (default 2 seconds, up to 8). It sets two things at once: the size of the
+  step the offset may take each tick, and how long new content must hold
+  before it counts at all — so at a longer setting, alt-tabbing through a
+  bright window for a moment changes nothing.
+- **Reset to defaults** — puts the three sliders above back to the values the
+  app ships with. It leaves the toggles alone: those are choices, not tuning.
 - **Pause for 1 hour** — temporarily suspend adjustment, e.g. for a
   presentation, without disabling the app. Screen sampling stops for the
   duration. While a pause is running it is shown with a **Resume** button,

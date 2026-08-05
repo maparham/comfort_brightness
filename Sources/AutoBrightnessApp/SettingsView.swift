@@ -57,6 +57,18 @@ public struct SettingsView: View {
                 Slider(value: $model.maxOffset, in: AppModel.maxOffsetRange)
             }
 
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(format: "Time to adjust: %.1f seconds", model.responseSeconds))
+                Slider(value: $model.responseSeconds, in: AppModel.responseSecondsRange)
+            }
+
+            HStack {
+                Spacer()
+                Button("Reset to defaults", action: model.resetTuning)
+                    .disabled(model.isAtDefaultTuning)
+            }
+            .font(.caption)
+
             Divider()
 
             Toggle("Show icon in menu bar", isOn: $model.showsMenuBarIcon)
@@ -85,11 +97,31 @@ public struct SettingsView: View {
 
             Divider()
 
-            Button("Quit", action: model.quit)
+            HStack {
+                Button("Quit", action: model.quit)
+                Spacer()
+                if let version = Self.versionLabel {
+                    Text(version)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
         }
         .padding(16)
         .frame(width: 300)
     }
+
+    /// "1.0 (1)" from the bundle. Nil when run straight out of `swift build`,
+    /// where there is no Info.plist to read and a version would be a fiction.
+    private static let versionLabel: String? = {
+        let info = Bundle.main.infoDictionary
+        guard let short = info?["CFBundleShortVersionString"] as? String else { return nil }
+        guard let build = info?["CFBundleVersion"] as? String, build != short else {
+            return "Version \(short)"
+        }
+        return "Version \(short) (\(build))"
+    }()
 
     @ViewBuilder
     private var statusLabel: some View {
