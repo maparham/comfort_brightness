@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="51.2" y="51.2" width="921.6" height="921.6" rx="217.6"/>
+    </clipPath>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3a5c"/>
+      <stop offset="1" stop-color="#141d33"/>
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#squircle)">
+    <rect x="51.2" y="51.2" width="921.6" height="921.6" fill="url(#body)"/>
+    <rect x="192" y="243.2" width="640" height="435.2" rx="51.2"
+          fill="#fdf6e3" stroke="#e8edf5" stroke-width="25.6"/>
+    <circle cx="512" cy="460.8" r="96" fill="#f7b733"/>
+    <g stroke="#f7b733" stroke-width="25.6" stroke-linecap="round">
+      <line x1="512"   y1="313.6" x2="512"   y2="345.6"/>
+      <line x1="512"   y1="576"   x2="512"   y2="608"/>
+      <line x1="364.8" y1="460.8" x2="396.8" y2="460.8"/>
+      <line x1="627.2" y1="460.8" x2="659.2" y2="460.8"/>
+      <line x1="409.6" y1="358.4" x2="432"   y2="380.8"/>
+      <line x1="592"   y1="540.8" x2="614.4" y2="563.2"/>
+      <line x1="409.6" y1="563.2" x2="432"   y2="540.8"/>
+      <line x1="592"   y1="380.8" x2="614.4" y2="358.4"/>
+    </g>
+    <path d="M448 704 h128 l25.6 76.8 h-179.2 Z" fill="#e8edf5"/>
+    <rect x="358.4" y="780.8" width="307.2" height="38.4" rx="19.2" fill="#e8edf5"/>
+  </g>
+</svg>
