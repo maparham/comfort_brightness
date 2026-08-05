@@ -34,9 +34,61 @@ targets:
       - package: AutoBrightness
         product: AutoBrightnessCore
 
+    preBuildScripts:
+      # Gives every build its own CFBundleVersion.
+      #
+      # It writes a stamped *copy* of Info.plist into the derived-files dir and
+      # INFOPLIST_FILE points at that copy, rather than stamping the plist inside
+      # the built .app. Xcode schedules script phases early and ProcessInfoPlist
+      # late, so anything written into the bundle here is overwritten from the
+      # source plist before signing — generating the input is the only placement
+      # the ordering actually respects.
+      #
+      # Resources/Info.plist stays the source of truth and stays untouched: a
+      # plist rewritten on every build would put a spurious diff in front of
+      # every commit and conflict on every rebase. The counter lives in a
+      # git-ignored file at the repo root rather than in DerivedData so that
+      # "Clean Build Folder" does not send the number back to 1.
+      #
+      # Inline rather than a file under Scripts/ because script sandboxing (on,
+      # below) refuses to read a script out of the source tree.
+      - name: Stamp build number
+        # basedOnDependencyAnalysis would let Xcode skip the phase whenever its
+        # outputs look up to date, and a number that only sometimes moves is
+        # worse than no number at all.
+        basedOnDependencyAnalysis: false
+        # Declared so the sandbox grants this phase the reads and writes it
+        # needs; it permits exactly the files named here.
+        inputFiles:
+          - $(SRCROOT)/Resources/Info.plist
+        outputFiles:
+          - $(SRCROOT)/.build-number
+          - $(DERIVED_FILE_DIR)/Info.plist
+        script: |
+          set -euo pipefail
+          counter="${SRCROOT}/.build-number"
+          # A missing or corrupt counter restarts the count at 1 rather than
+          # failing the build.
+          current=$(cat "$counter" 2>/dev/null || true)
+          [[ "$current" =~ ^[0-9]+$ ]] || current=0
+          next=$((current + 1))
+          printf '%s\n' "$next" > "$counter"
+
+          mkdir -p "${DERIVED_FILE_DIR}"
+          cp "${SRCROOT}/Resources/Info.plist" "${DERIVED_FILE_DIR}/Info.plist"
+          # plutil rather than PlistBuddy: PlistBuddy answers a plist it cannot
+          # read by writing an empty one, which then looks like a valid, merely
+          # up-to-date Info.plist to the rest of the build.
+          plutil -replace CFBundleVersion -string "$next" \
+            "${DERIVED_FILE_DIR}/Info.plist"
+          echo "note: build number $next"
+
     settings:
       base:
-        INFOPLIST_FILE: Resources/Info.plist
+        # The stamped copy the "Stamp build number" phase writes, not the
+        # checked-in original. Resources/Info.plist remains the source of truth
+        # and the file to edit; only CFBundleVersion differs between them.
+        INFOPLIST_FILE: $(DERIVED_FILE_DIR)/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         PRODUCT_NAME: AutoBrightness
         PRODUCT_BUNDLE_IDENTIFIER: com.mahmoudparham.AutoBrightness
