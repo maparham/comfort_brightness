@@ -329,6 +329,75 @@ func largeJumpIsFollowedGradually() {
     #expect((fake.read() ?? 0) >= 0.94)
 }
 
+@Test("The battery dim right after a power-source change keeps the offset")
+func powerSourceDimKeepsOffset() {
+    let fake = FakeBrightness(value: 0.75)
+    let coordinator = Coordinator(brightness: fake, settings: .defaults)
+    for _ in 0..<20 {
+        coordinator.tick(luminance: 0.95)  // settled: offset -0.20, panel 0.55
+    }
+    #expect(coordinator.appliedOffset < -0.19)
+
+    // The power source flips, and within a tick macOS steps the panel down —
+    // measured on hardware as one -0.25 step with no ramp. Nobody decided
+    // anything about this page, so the offset must survive rather than being
+    // re-learned as the new normal.
+    coordinator.notePowerSourceChange()
+    fake.externalChange(to: (fake.read() ?? 0) - 0.25)
+    for _ in 0..<8 {
+        coordinator.tick(luminance: 0.95)
+    }
+    #expect(coordinator.appliedOffset < -0.19)
+    // The dim itself is still followed: the baseline came down with the panel.
+    // Panel 0.55 → 0.30, offset −0.20 kept, so baseline lands at 0.50.
+    #expect(abs(coordinator.baseline - 0.50) < 0.01)
+    #expect(abs((fake.read() ?? 0) - 0.30) < 0.01)
+}
+
+@Test("A big jump well after a power-source change is still deliberate")
+func lateJumpAfterPowerEventStillReneutralizes() {
+    let fake = FakeBrightness(value: 0.75)
+    let coordinator = Coordinator(brightness: fake, settings: .defaults)
+    for _ in 0..<20 {
+        coordinator.tick(luminance: 0.95)
+    }
+
+    // A power event happens, but the panel move comes long after the grace
+    // window: that is the user again, and must re-teach the neutral as always.
+    coordinator.notePowerSourceChange()
+    for _ in 0..<10 {
+        coordinator.tick(luminance: 0.95)
+    }
+    fake.externalChange(to: (fake.read() ?? 0) - 0.20)
+    for _ in 0..<8 {
+        coordinator.tick(luminance: 0.95)
+    }
+    #expect(abs(coordinator.appliedOffset) < 0.01)
+}
+
+@Test("A power flip during a pause does not leak its grace into the resume")
+func powerFlipWhilePausedDoesNotLeakGrace() {
+    let fake = FakeBrightness(value: 0.60)
+    let coordinator = Coordinator(brightness: fake, settings: .defaults)
+    for _ in 0..<20 {
+        coordinator.tick(luminance: 0.95)
+    }
+
+    // Unplugging a docked, locked machine: the flip arrives while paused, so
+    // no tick ever consumes the window. The dim it announced is absorbed by
+    // resume()'s baseline re-read, so by resume time the window is stale — a
+    // deliberate keypress right after waking must still re-teach the neutral.
+    coordinator.suspend()
+    coordinator.notePowerSourceChange()
+    coordinator.resume()
+    coordinator.tick(luminance: 0.95)
+    fake.externalChange(to: (fake.read() ?? 0) - 0.20)
+    for _ in 0..<8 {
+        coordinator.tick(luminance: 0.95)
+    }
+    #expect(abs(coordinator.appliedOffset) < 0.01)
+}
+
 @Test("An uncontrollable display is handled without crashing")
 func unavailableDisplay() {
     let fake = FakeBrightness(value: 0.60, canControl: false)

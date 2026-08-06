@@ -12,6 +12,7 @@ public final class AppModel {
     private let coordinator: Coordinator
     private var sampler: ScreenSampler?
     private var pauseMonitor: PauseMonitor?
+    private var powerSourceMonitor: PowerSourceMonitor?
     private var pauseTimer: Timer?
     /// Keeps the brightness readout honest while nothing else is ticking:
     /// paused, disabled, or sampler down, the user can still change brightness
@@ -211,6 +212,12 @@ public final class AppModel {
         )
         monitor.start()
         pauseMonitor = monitor
+
+        let powerMonitor = PowerSourceMonitor(onChange: { [weak self] in
+            self?.coordinator.notePowerSourceChange()
+        })
+        powerMonitor.start()
+        powerSourceMonitor = powerMonitor
 
         sampler = ScreenSampler(
             onFrame: { [weak self] frame in

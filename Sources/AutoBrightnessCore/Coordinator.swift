@@ -47,6 +47,16 @@ public final class Coordinator {
     /// re-learning the neutral on a ramp would zero the content offset every few
     /// seconds and switch the feature off in all but name.
     static let deliberateChangeThreshold = 0.03
+    /// How many ticks after a power-source change a large jump is attributed to
+    /// the OS rather than the user. Measured on hardware: the battery dim lands
+    /// as a single step within 200 ms of the power-source notification, so two
+    /// seconds is generous — while short enough that a user reaching for the
+    /// keys because the dim annoyed them is classified normally again. The
+    /// accepted cost: a keypress landing *inside* the window is followed but
+    /// not allowed to re-teach the neutral, so its offset re-ramps rather than
+    /// resetting. Two seconds of that beats the dim zeroing the offset on
+    /// every unplug.
+    static let powerEventGraceTicks = 4
 
     private let brightness: BrightnessControlling
     private var controller = Controller()
@@ -84,6 +94,11 @@ public final class Coordinator {
     private var biasEstimate: Double = 0
     /// True while the baseline is still stepping toward a large external move.
     private var isCatchingUp = false
+    /// Ticks left in which a large jump is read as the OS reacting to a power
+    /// event (the on-battery dim) rather than the user deciding a level. The
+    /// jump is still followed either way; only the re-teaching of the neutral
+    /// is withheld, because nobody chose anything.
+    private var powerEventTicksRemaining = 0
     /// The level the user last chose, as they saw it on the panel. "Maximum
     /// change" is a promise about this number, not about `baseline`: the two
     /// differ by whatever offset happened to be applied at the moment they
@@ -123,6 +138,11 @@ public final class Coordinator {
         lastLuminance = luminance
         guard isEnabled, !isPaused, brightness.canControl else { return }
         guard let actual = brightness.read() else { return }
+        // Consumed per processed tick rather than by wall clock, so a grace
+        // window opened while ticking is exactly `powerEventGraceTicks` long.
+        defer {
+            if powerEventTicksRemaining > 0 { powerEventTicksRemaining -= 1 }
+        }
 
         // Anything we did not write ourselves is the user's intent — a brightness
         // key, or the ambient sensor. Fold it into the baseline so their
@@ -290,10 +310,18 @@ public final class Coordinator {
     /// Smaller moves — the ambient sensor, a read-back artefact — only move the
     /// level, because re-learning on those would zero the offset continuously.
     private func adopt(userLevel level: Double, movedThisInterval movement: Double) {
-        if abs(movement) > Self.deliberateChangeThreshold {
+        if abs(movement) > Self.deliberateChangeThreshold, powerEventTicksRemaining == 0 {
             controller.reneutralize()
         }
         userLevel = level
+    }
+
+    /// Tells the coordinator the machine's power source just changed, so the
+    /// jump the OS is about to make (dim on unplug, partial restore on replug)
+    /// is not mistaken for the user choosing a level. See
+    /// `powerEventGraceTicks`.
+    public func notePowerSourceChange() {
+        powerEventTicksRemaining = Self.powerEventGraceTicks
     }
 
     /// Takes the panel's current level as the user's intent, net of the offset we
@@ -350,6 +378,11 @@ public final class Coordinator {
         resetExternalTracking()
         didRefreshAnchor = false
         isCatchingUp = false
+        // A power flip that arrived while paused opened a grace window no tick
+        // ever consumed. The jump it announced is absorbed by the baseline
+        // re-read below, so by now the window could only do harm: it would
+        // deny the first deliberate keypress after waking its re-teaching.
+        powerEventTicksRemaining = 0
         // `biasEstimate` deliberately survives: it describes the actuator, not
         // the session. Forgetting it would make the app re-learn — and re-absorb
         // — the same bias after every sleep/wake.
@@ -375,6 +408,9 @@ public final class Coordinator {
         resetExternalTracking()
         didRefreshAnchor = false
         isCatchingUp = false
+        // Stale for the same reason as in `resume()`: whatever jump the flip
+        // announced is irrelevant once the panel is handed back wholesale.
+        powerEventTicksRemaining = 0
         controller.reset()
         // The panel has just been handed back to the baseline, so that is where
         // the user is now: the offset that was on top of it is gone.
