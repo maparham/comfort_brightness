@@ -116,7 +116,15 @@ targets:
         Release:
           # Distributable identity for anything leaving this machine. Notarize
           # before sharing; Gatekeeper will otherwise quarantine it.
+          #
+          # Manual signing, because Xcode refuses to reconcile a named identity
+          # with the automatic signing the Debug side wants: automatic picks the
+          # identity from a provisioning profile it manages, so naming one here
+          # is a contradiction and the build fails before it starts. Developer ID
+          # needs no profile — the certificate alone is enough.
+          CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Developer ID Application"
+          PROVISIONING_PROFILE_SPECIFIER: ""
           SWIFT_COMPILATION_MODE: wholemodule
 
 schemes:
