@@ -18,6 +18,9 @@ let package = Package(
         // No dependency on the core: the probe resolves the two symbols it needs
         // itself, precisely so it stays runnable in isolation.
         .executableTarget(name: "ALSProbe"),
+        // Standalone for the same reason as ALSProbe: it measures the hardware
+        // the app is built on, so it must not depend on that app.
+        .executableTarget(name: "DDCProbe"),
         .testTarget(
             name: "AutoBrightnessCoreTests",
             dependencies: ["AutoBrightnessCore"]

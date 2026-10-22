@@ -66,10 +66,10 @@ Probed read-only on the development machine before writing this spec:
   registry path contains `…/dispext0:dcpav-service-epic:0/DCPAVServiceProxy`.
   The framebuffer node name (`dispext0`) links the two.
 
-No DDC *write* has been made yet. Write behaviour (latency, minimum spacing,
-whether read-back reflects a write at once) is measured in the first
-implementation task, with the pass/fail criteria under Testing, before
-anything depends on it.
+DDC writes, measured with `swift run DDCProbe` on 2026-10-22: every write was
+acknowledged; read-back matched after at most 126 ms; a second write 10 ms
+after the first was honoured. `Timing.standard` uses settleWindow 226 ms and
+spacing 50 ms.
 
 ## Architecture
 
