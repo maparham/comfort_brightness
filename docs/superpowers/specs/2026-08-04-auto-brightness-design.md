@@ -403,7 +403,8 @@ a contained change.
 
 ## Non-Goals
 
-- External monitor control via DDC/CI
+- ~~External monitor control via DDC/CI~~ — now in scope; see
+  `2026-10-22-external-displays-design.md`.
 - Software dimming below the panel's hardware minimum
 - Per-app or per-window brightness profiles
 - Mac App Store distribution

@@ -97,16 +97,20 @@ interaction as unverified rather than assume it either works cleanly or
 causes problems. If you do observe the two fighting each other in practice,
 turning off "Automatically adjust brightness" removes the variable entirely.
 
-Auto Brightness controls only the built-in display; external monitors are
-left untouched. It finds the built-in panel explicitly rather than using
-whichever display is primary, so an external monitor set as the main display
-changes nothing: the app still measures and adjusts the built-in one. With no
-built-in panel available — a Mac mini, or a laptop closed in clamshell mode —
-it reports that and does nothing at all, and it starts working the moment a
-built-in panel appears: open the lid, or undock, and the app picks it up
-without needing to be relaunched. Brightness read-back on Apple
-Silicon hardware is exact, so the app always knows the true current level
-before applying an offset.
+Auto Brightness adjusts every connected display it can drive, each from its
+own content: dark content on one screen does not dim another. The built-in
+panel and Apple's own displays (Studio Display, Pro Display XDR, LG
+UltraFine) are driven through the same system interface as the brightness
+keys. Other monitors are driven over DDC/CI, the standard most monitors
+accept over USB-C, DisplayPort and HDMI, on Apple Silicon Macs only.
+
+The popover lists each display. One that cannot be driven says why: no DDC
+connection (DisplayLink docks, AirPlay, Sidecar, some hubs and KVMs), a
+monitor that did not answer (check that DDC/CI is enabled in its own menu),
+or one that accepts commands but ignores them. Pressing a monitor's own
+brightness buttons is followed rather than fought, usually within a second.
+Displays can come and go while the app runs; it picks them up without a
+relaunch.
 
 ## Building and installing
 
