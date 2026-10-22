@@ -35,6 +35,9 @@ final class DisplayUnit {
     /// Called when the backend finds the display cannot be driven at all, so
     /// the manager can retire the unit and say why.
     @ObservationIgnored var onUnusable: (() -> Void)?
+    /// Called when `isResponding` flips, so the manager can look for a fresh
+    /// DDC handle while the monitor is not answering.
+    @ObservationIgnored var onRespondingChange: (() -> Void)?
 
     @ObservationIgnored private let backend: Backend
     @ObservationIgnored private let control: BrightnessControlling
@@ -175,11 +178,13 @@ final class DisplayUnit {
 
     private func controlChanged() {
         guard case .ddc(let ddc, _) = backend else { return }
+        let wasResponding = isResponding
         isResponding = ddc.isResponding
         guard ddc.canControl else {
             onUnusable?()
             return
         }
         apply(userWantsIt: userWantsIt)
+        if isResponding != wasResponding { onRespondingChange?() }
     }
 }

@@ -40,15 +40,22 @@ final class DisplayManager {
     /// A monitor still waking up at login answers a few seconds later; one
     /// that never answers is tried once a minute rather than given up on.
     static let retryDelays: [Double] = [5, 10, 20, 60]
+    /// Pending re-matches for DDC units that are not answering, on the same
+    /// backoff as `retries`. A handle can die without any notification (a DCP
+    /// service recreated across sleep), and only a fresh one brings it back.
+    @ObservationIgnored private var rematches: [CGDirectDisplayID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var rematchAttempts: [CGDirectDisplayID: Int] = [:]
 
     func reconcile() {
         generation += 1
         let active = DisplayRegistry.activeDisplayIDs()
-        for unit in units where !active.contains(unit.displayID) { unit.tearDown() }
-        units.removeAll { !active.contains($0.displayID) }
+        for unit in units where !active.contains(unit.displayID) { retire(unit) }
         retries.values.forEach { $0.cancel() }
         retries = [:]
         retryAttempts = [:]
+        rematches.values.forEach { $0.cancel() }
+        rematches = [:]
+        rematchAttempts = [:]
         // Everything not being driven is worked out again from scratch: a
         // reconfiguration is exactly when an earlier answer may have changed.
         others = []
@@ -60,6 +67,8 @@ final class DisplayManager {
             if case .transport(let transport) = ddc[unit.displayID] {
                 unit.replaceTransport(transport)
             }
+            // Just given a fresh handle; keep trying later if it stays silent.
+            if !unit.isResponding { scheduleRematch(unit) }
         }
         for id in active where !units.contains(where: { $0.displayID == id }) {
             resolve(id, ddc: ddc[id] ?? .noService)
@@ -72,13 +81,39 @@ final class DisplayManager {
         for other in others where other.note == Note.noResponse {
             retryProbe(other.id)
         }
-        let stale = units.filter { $0.usesDDC && !$0.isResponding }
-        guard !stale.isEmpty else { return }
+        for unit in units where unit.usesDDC && !unit.isResponding {
+            rematch(unit)
+        }
+    }
+
+    /// Gives a DDC unit that is not answering a freshly matched handle, and
+    /// tries again on the backoff for as long as it stays silent. Stops once
+    /// it answers or is dropped.
+    private func rematch(_ unit: DisplayUnit) {
+        let id = unit.displayID
+        // Cancelled, not just dropped, for the same reason as `retryProbe`.
+        rematches.removeValue(forKey: id)?.cancel()
+        guard unit.usesDDC, !unit.isResponding, units.contains(where: { $0 === unit }) else {
+            rematchAttempts[id] = nil
+            return
+        }
         let ddc = DisplayRegistry.ddcResolutions(for: Self.externals(of: DisplayRegistry.activeDisplayIDs()))
-        for unit in stale {
-            if case .transport(let transport) = ddc[unit.displayID] {
-                unit.replaceTransport(transport)
-            }
+        if case .transport(let transport) = ddc[id] {
+            unit.replaceTransport(transport)
+        }
+        scheduleRematch(unit)
+    }
+
+    private func scheduleRematch(_ unit: DisplayUnit) {
+        let id = unit.displayID
+        let attempt = rematchAttempts[id, default: 0]
+        rematchAttempts[id] = attempt + 1
+        let delay = Self.retryDelays[min(attempt, Self.retryDelays.count - 1)]
+        rematches[id]?.cancel()
+        rematches[id] = Task { [weak self, weak unit] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self, let unit else { return }
+            self.rematch(unit)
         }
     }
 
@@ -158,13 +193,24 @@ final class DisplayManager {
     private func add(_ unit: DisplayUnit) {
         unit.onUnusable = { [weak self, weak unit] in
             guard let self, let unit else { return }
-            unit.tearDown()
-            self.units.removeAll { $0 === unit }
+            self.retire(unit)
             self.setNote(unit.displayID, name: unit.name, Note.unwritable)
+        }
+        unit.onRespondingChange = { [weak self, weak unit] in
+            guard let self, let unit else { return }
+            self.rematch(unit)
         }
         units.append(unit)
         units.sort { ($0.isBuiltin ? 0 : 1, $0.displayID) < ($1.isBuiltin ? 0 : 1, $1.displayID) }
         onUnitAdded?(unit)
+    }
+
+    /// Drops a unit, and any re-match pending for it.
+    private func retire(_ unit: DisplayUnit) {
+        rematches.removeValue(forKey: unit.displayID)?.cancel()
+        rematchAttempts[unit.displayID] = nil
+        unit.tearDown()
+        units.removeAll { $0 === unit }
     }
 
     private func setNote(_ id: CGDirectDisplayID, name: String, _ note: String) {
