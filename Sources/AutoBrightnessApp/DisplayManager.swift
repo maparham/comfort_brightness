@@ -45,6 +45,11 @@ final class DisplayManager {
     /// service recreated across sleep), and only a fresh one brings it back.
     @ObservationIgnored private var rematches: [CGDirectDisplayID: Task<Void, Never>] = [:]
     @ObservationIgnored private var rematchAttempts: [CGDirectDisplayID: Int] = [:]
+    /// The user's baseline on each display that left the list while driven.
+    /// A departing unit's restore write cannot reach a display that is already
+    /// gone, so the display keeps whatever offset it had; a fresh unit would
+    /// otherwise adopt that as the user's level. In memory only, by design.
+    @ObservationIgnored private var departedBaselines: [CGDirectDisplayID: Double] = [:]
 
     func reconcile() {
         generation += 1
@@ -122,7 +127,10 @@ final class DisplayManager {
         let services = DisplayServicesBrightness(displayID: id)
         if services.canControl {
             let ramping = RampingBrightness(wrapping: services, scheduler: TimerRampScheduler())
-            add(DisplayUnit(displayID: id, name: name, backend: .displayServices(ramping)))
+            add(DisplayUnit(
+                displayID: id, name: name, backend: .displayServices(ramping),
+                rememberedBaseline: departedBaselines.removeValue(forKey: id)
+            ))
             return
         }
         guard CGDisplayIsBuiltin(id) == 0 else {
@@ -154,7 +162,10 @@ final class DisplayManager {
             self.retryAttempts[id] = nil
             let link = DDCQueueLink(transport: transport, seed: reading)
             let ddc = DDCBrightness(link: link, seed: reading)
-            self.add(DisplayUnit(displayID: id, name: name, backend: .ddc(ddc, link)))
+            self.add(DisplayUnit(
+                displayID: id, name: name, backend: .ddc(ddc, link),
+                rememberedBaseline: self.departedBaselines.removeValue(forKey: id)
+            ))
         }
     }
 
@@ -205,8 +216,10 @@ final class DisplayManager {
         onUnitAdded?(unit)
     }
 
-    /// Drops a unit, and any re-match pending for it.
+    /// Drops a unit, remembering its baseline in case the display returns
+    /// (see `departedBaselines`).
     private func retire(_ unit: DisplayUnit) {
+        departedBaselines[unit.displayID] = unit.currentBaseline
         rematches.removeValue(forKey: unit.displayID)?.cancel()
         rematchAttempts[unit.displayID] = nil
         unit.tearDown()

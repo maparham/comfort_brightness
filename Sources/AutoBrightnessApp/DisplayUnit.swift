@@ -51,7 +51,11 @@ final class DisplayUnit {
     /// run out of order and leave the capture indicator lit.
     @ObservationIgnored private var samplerTask: Task<Void, Never>?
 
-    init(displayID: CGDirectDisplayID, name: String, backend: Backend) {
+    /// `rememberedBaseline` is the level the user had on this display when it
+    /// last left the display list. It is written before the coordinator first
+    /// reads the backend, so the coordinator adopts it rather than whatever
+    /// offset the display was left at.
+    init(displayID: CGDirectDisplayID, name: String, backend: Backend, rememberedBaseline: Double? = nil) {
         self.displayID = displayID
         self.name = name
         isBuiltin = CGDisplayIsBuiltin(displayID) != 0
@@ -62,6 +66,10 @@ final class DisplayUnit {
         case .ddc(let ddc, _): control = ddc
         }
         self.control = control
+        // Both backends answer `read()` with a level just written, before it
+        // has reached the display: DDC with the requested level, ramping with
+        // the pending target.
+        if let rememberedBaseline { control.write(rememberedBaseline) }
         coordinator = Coordinator(brightness: control)
         baseline = coordinator.baseline
 
@@ -89,6 +97,10 @@ final class DisplayUnit {
     var usesDDC: Bool {
         if case .ddc = backend { true } else { false }
     }
+
+    /// The coordinator's baseline right now. `baseline` is only a snapshot
+    /// for the UI, taken at the last readout.
+    var currentBaseline: Double { coordinator.baseline }
 
     var settings: ControllerSettings {
         get { coordinator.settings }
