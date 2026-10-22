@@ -113,7 +113,7 @@ public final class AppModel {
     }
 
     /// Puts the tuning sliders back to what the app ships with. Each property's
-    /// `didSet` carries the value through to the coordinator and to
+    /// `didSet` carries the value through to every display's coordinator and to
     /// `UserDefaults`, so there is nothing else to keep in step here.
     ///
     /// The toggles are deliberately left alone. Enabling, the menu bar icon and

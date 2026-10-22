@@ -16,7 +16,7 @@ enum DisplayRegistry {
 
     private typealias InfoFunction = @convention(c) (CGDirectDisplayID) -> Unmanaged<CFDictionary>?
 
-    nonisolated(unsafe) private static let displayInfo: InfoFunction? = {
+    private static let displayInfo: InfoFunction? = {
         guard let coreDisplay = dlopen(
             "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay", RTLD_LAZY
         ), let symbol = dlsym(coreDisplay, "CoreDisplay_DisplayCreateInfoDictionary") else { return nil }
@@ -91,7 +91,8 @@ enum DisplayRegistry {
             var path = [CChar](repeating: 0, count: 512)
             if location == "External",
                IORegistryEntryGetPath(service, kIOServicePlane, &path) == KERN_SUCCESS {
-                found.append((String(cString: path), service))
+                let bytes = path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                found.append((String(decoding: bytes, as: UTF8.self), service))
             } else {
                 IOObjectRelease(service)
             }

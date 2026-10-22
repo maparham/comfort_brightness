@@ -1,6 +1,6 @@
 # Auto Brightness
 
-A macOS menu bar app that nudges your built-in display's brightness based on
+A macOS menu bar app that nudges your displays' brightness based on
 what's actually on screen — without taking control away from you.
 
 ## The problem

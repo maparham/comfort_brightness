@@ -8,7 +8,8 @@ private typealias DSCan = @convention(c) (CGDirectDisplayID) -> Int32
 private typealias CDGet = @convention(c) (CGDirectDisplayID) -> Double
 private typealias CDSet = @convention(c) (CGDirectDisplayID, Double) -> Void
 
-/// Reads and writes the built-in panel's backlight through private frameworks.
+/// Reads and writes its display's brightness through private frameworks: the
+/// built-in panel, or an Apple external such as a Studio Display.
 ///
 /// There is no public API for this. Symbols are resolved at runtime rather than
 /// linked, so a future macOS that removes them yields `canControl == false`
@@ -96,7 +97,7 @@ public final class DisplayServicesBrightness: BrightnessControlling {
         }
     }
 
-    /// The built-in panel plus a working set of symbols for it, or nil.
+    /// Its display while active, with symbols resolved against it; else nil.
     private var controllableDisplayID: CGDirectDisplayID? {
         guard let id = displayID else { return nil }
         resolveSymbolsIfNeeded(for: id)

@@ -18,7 +18,7 @@ final class IOAVServiceTransport: DDCTransport, @unchecked Sendable {
         let read: Transfer
     }
 
-    nonisolated(unsafe) private static let symbols: Symbols? = {
+    private static let symbols: Symbols? = {
         guard let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY),
               let create = dlsym(iokit, "IOAVServiceCreateWithService"),
               let write = dlsym(iokit, "IOAVServiceWriteI2C"),
