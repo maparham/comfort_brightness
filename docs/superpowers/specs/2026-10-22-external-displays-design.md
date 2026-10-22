@@ -260,21 +260,33 @@ external observations main has applied so far. On the queue:
 
 #### Reading
 
-A refresh read is due every `refreshInterval` (1 s). It is never skipped
-because of writes:
+The engine reads the monitor in two situations, and never sends while a read
+is due:
 
-- **Quiet barrier.** When a read is due and the last send was less than
-  `settleWindow` ago, the queue holds back further sends until the window
-  has passed, then reads before sending anything. During active adjustment
-  this pauses the glide for at most `settleWindow` plus one read (about
-  0.4 s) once per second. The coordinator is not affected: it only sees
-  `requested`.
-- **Comparing.** A reply equal to `lastKnown` means nothing changed. A
-  different reply is an external change: `lastKnown = reply`, the target is
-  dropped (it predates the press), the engine's observation count goes up by
-  one, and the reply is posted to main as `.observed(level, maximum, count)`.
-- **On main,** an observation is always applied, never dropped. Main records
-  its count as `seenObservations`.
+- **Before every glide.** When a write starts a new glide (no glide was in
+  progress), the engine first reads the monitor and checks that it is still
+  at `lastKnown`. Writes are absolute, so without this check any write sent
+  after a button press but before the next refresh would silently erase the
+  press. It costs one read (~70 ms) per glide, and the coordinator starts at
+  most one glide per tick. A press made during the ~0.2 s of the glide itself
+  can still be overwritten. That is accepted.
+- **Every `refreshInterval` (1 s)**, to notice presses while nothing is
+  being written.
+
+Two rules apply to both kinds of read:
+
+- **Quiet barrier.** No read is made until `settleWindow` has passed since
+  the last send, and sends are held until the read is done. Monitors can
+  briefly report their previous level after a write. The coordinator is not
+  affected: it only sees `requested`.
+- **A failed read is retried** no sooner than 0.25 s later.
+
+**Comparing.** A reply equal to `lastKnown` means nothing changed, and a
+pending glide may proceed. A different reply is an external change. The
+engine posts `.observed(level: reply, expected: lastKnown, maximum, count)`,
+then sets `lastKnown = reply`, drops the target (it predates the press), and
+increments the observation count. On main, an observation is always applied,
+never dropped, and main records `count` as `seenObservations`.
 
 `settleWindow` starts at 300 ms. It becomes a named constant set from the
 measurement in the first implementation task.
@@ -282,14 +294,19 @@ measurement in the first implementation task.
 #### `read()`
 
 - Before the probe has seeded it: nil.
-- With no observation: `requested`, or, before any write, the probe's level
+- Otherwise, `base` is `requested`, or, before any write, the probe's level
   `current / maximum`.
-- With an observation `obs`:
-  `base + (obs − round(base × maximum)) / maximum`, where `base` is the value
-  from the previous item, clamped to 0…1. An external change is therefore
-  reported as a whole number of the monitor's steps away from what was asked
-  for. It never carries the rounding of the request itself, so a one-step
-  press always reads as exactly one step.
+- Main keeps `observedSteps`, the sum of `level − expected` over every
+  observation since the last `write`. `write` resets it to 0.
+- `read()` returns `base + observedSteps / maximum`, clamped to 0…1.
+
+An external change is therefore reported as exactly the number of steps the
+monitor moved, added to the level the coordinator last wrote. It never
+carries the rounding of the request. It also never includes the app's own
+write when that write was cancelled by the press: the steps are measured from
+what the monitor was actually showing, not from what the app had asked for.
+The coordinator's arithmetic `baseline = userLevel − appliedOffset` then lands
+on the user's previous baseline moved by the steps they pressed.
 
 #### Failure, recovery and writability
 
@@ -305,12 +322,13 @@ measurement in the first implementation task.
   is asleep (`Coordinator.swift:404` skips the write when `canControl` is
   false). The restore stays as the target. On the first successful read
   after a dropout, that read is *not* reported as an observation when a
-  target is waiting. `lastKnown` takes the read value, and the target is
-  sent next. When the coordinator resumes, it reads back the restored
+  target is waiting. `lastKnown` takes the read value, the glide counts as
+  checked, and the target is sent next. When the coordinator resumes, it reads back the restored
   baseline rather than a level that still carries the old offset.
 - **Writability check.** Suppose acknowledged sends have happened since the
   last read, and the next read shows exactly the level that read had
-  established. That means the sends were not applied. When this happens on
+  established. A read that comes after sends and matches resets the count.
+  A read with no sends before it leaves the count alone. That means the sends were not applied. When this happens on
   3 reads in a row, `canControl` becomes false with the reason "Doesn't
   accept brightness changes". It stays that way until the next
   reconfiguration, and the manager re-lists the display as not adjustable.
