@@ -10,6 +10,8 @@ enum DisplayRegistry {
         case transport(IOAVServiceTransport)
         case noService
         case ambiguous
+        /// Matched a service but could not open it, which can be transient.
+        case unopened
         /// The private symbols this needs are gone on this macOS.
         case unavailable
     }
@@ -64,7 +66,7 @@ enum DisplayRegistry {
             switch matches[id] ?? .noService {
             case .matched(let index):
                 result[id] = IOAVServiceTransport(service: services[index].service)
-                    .map(DDCResolution.transport) ?? .unavailable
+                    .map(DDCResolution.transport) ?? .unopened
             case .noService:
                 result[id] = .noService
             case .ambiguous:

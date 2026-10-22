@@ -146,6 +146,9 @@ final class DisplayManager {
         case .noService: setNote(id, name: name, Note.noService)
         case .ambiguous: setNote(id, name: name, Note.ambiguous)
         case .unavailable: setNote(id, name: name, Note.unavailable)
+        case .unopened:
+            setNote(id, name: name, Note.noResponse)
+            scheduleRetry(id)
         }
     }
 

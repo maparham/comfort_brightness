@@ -172,7 +172,13 @@ final class DisplayUnit {
         coordinator.restoreBaseline()
         switch backend {
         case .displayServices(let ramping): ramping.flush()
-        case .ddc(let ddc, _): ddc.invalidate()
+        case .ddc(let ddc, _):
+            // A monitor retired while still on the bus (its display ID
+            // changed, or it went into a mirror set) would otherwise stop
+            // partway through the restore glide. The flush lands it in one
+            // send; it is queued ahead of the invalidate, so nothing waits.
+            ddc.startFlush()
+            ddc.invalidate()
         }
     }
 
