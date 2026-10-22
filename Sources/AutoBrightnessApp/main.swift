@@ -84,11 +84,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.prepareForTermination()
     }
 
-    /// Shows the app glyph and the panel's brightness as a percentage. The
-    /// glyph is hidden when the user turns it off, and the percentage is
-    /// dropped when brightness cannot be read (no built-in panel, clamshell,
-    /// symbols gone). `withObservationTracking` fires once per change, so each
-    /// update re-arms it.
+    /// Shows the app glyph and the main display's brightness as a percentage.
+    /// The glyph is hidden when the user turns it off, and the percentage is
+    /// dropped when no display's brightness can be read.
+    /// `withObservationTracking` fires once per change, so each update re-arms
+    /// it.
     ///
     /// Nothing here may return without leaving exactly one thing pending — an
     /// observation or a retry. This is the only thing that schedules the next
@@ -117,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemRetry?.cancel()
         statusItemRetry = nil
         let (brightness, showsIcon) = withObservationTracking {
-            (model.displayBrightness, model.showsMenuBarIcon)
+            (model.menuBarBrightness, model.showsMenuBarIcon)
         } onChange: {
             Task { @MainActor [weak self] in
                 self?.updateStatusItem()

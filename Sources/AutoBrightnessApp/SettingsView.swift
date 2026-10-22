@@ -14,13 +14,22 @@ public struct SettingsView: View {
             Toggle("Adjust brightness to content", isOn: $model.isEnabled)
                 .toggleStyle(.switch)
 
-            HStack {
-                if let brightness = model.displayBrightness {
-                    Label("Brightness", systemImage: "sun.max")
-                    Text("\(Int((brightness * 100).rounded()))%")
-                        .fontWeight(.semibold)
-                        .monospacedDigit()
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(model.units, id: \.displayID) { unit in
+                    DisplayRow(unit: unit, isEnabled: model.isEnabled)
                 }
+                ForEach(model.otherDisplays) { other in
+                    HStack {
+                        Label(other.name, systemImage: "display")
+                        Spacer()
+                        Text(other.note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            HStack {
                 Spacer()
                 // Shown whether or not the app is enabled: a user who pauses and
                 // then switches the toggle off must still be able to see that a
@@ -34,16 +43,15 @@ public struct SettingsView: View {
                 }
             }
 
-            if !model.canControlBrightness {
-                Label(
-                    "Brightness control is unavailable on this system.",
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
+            if !model.hasAdjustableDisplay && !model.isCheckingDisplays {
+                Label("No adjustable displays", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
 
-            statusLabel
+            if model.needsScreenRecordingPermission {
+                permissionNotice
+            }
 
             Divider()
 
@@ -85,10 +93,15 @@ public struct SettingsView: View {
             }
 
             DisclosureGroup("Details", isExpanded: $showDebug) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(format: "Screen luminance: %.3f", model.luminance))
-                    Text(String(format: "Applied offset: %+.3f", model.offset))
-                    Text(String(format: "Your baseline: %.3f", model.baseline))
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(model.units, id: \.displayID) { unit in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(unit.name).fontWeight(.semibold)
+                            Text(String(format: "Screen luminance: %.3f", unit.luminance))
+                            Text(String(format: "Applied offset: %+.3f", unit.offset))
+                            Text(String(format: "Your baseline: %.3f", unit.baseline))
+                        }
+                    }
                 }
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -123,50 +136,75 @@ public struct SettingsView: View {
         return "Version \(short) (\(build))"
     }()
 
-    @ViewBuilder
-    private var statusLabel: some View {
-        switch model.status {
-        case .running:
-            EmptyView()
-        case .idle:
-            Text(model.isEnabled ? "Starting…" : "Not watching the screen.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .stalled:
-            Text("Reconnecting to the display…")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .permissionDenied:
-            VStack(alignment: .leading, spacing: 4) {
-                Label(
-                    "Screen Recording permission is required.",
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-                HStack {
-                    Button("Open System Settings") {
-                        let url = URL(
-                            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-                        )!
-                        NSWorkspace.shared.open(url)
-                    }
-                    Button("Try Again", action: model.retrySampling)
+    private var permissionNotice: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(
+                "Screen Recording permission is required.",
+                systemImage: "exclamationmark.triangle"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+            HStack {
+                Button("Open System Settings") {
+                    let url = URL(
+                        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                    )!
+                    NSWorkspace.shared.open(url)
                 }
+                Button("Try Again", action: model.retrySampling)
+            }
+            .font(.caption)
+            // macOS usually only honours a screen-capture grant for a process
+            // that started after it, so say so rather than leaving the user
+            // pressing a button that cannot work.
+            Text("After granting permission, quit and reopen Auto Brightness if it does not start on its own.")
                 .font(.caption)
-                // macOS usually only honours a screen-capture grant for a process
-                // that started after it, so say so rather than leaving the user
-                // pressing a button that cannot work.
-                Text("After granting permission, quit and reopen Auto Brightness if it does not start on its own.")
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// One adjustable display: its name, its brightness, and anything wrong with
+/// its capture. Permission problems are left to the single notice above.
+private struct DisplayRow: View {
+    let unit: DisplayUnit
+    let isEnabled: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Label(unit.name, systemImage: unit.isBuiltin ? "laptopcomputer" : "display")
+                Spacer()
+                if !unit.isResponding {
+                    Text("Not responding")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if let brightness = unit.displayBrightness {
+                    Text("\(Int((brightness * 100).rounded()))%")
+                        .fontWeight(.semibold)
+                        .monospacedDigit()
+                }
+            }
+            if let note = statusNote {
+                Text(note)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var statusNote: String? {
+        switch unit.status {
+        case .running, .permissionDenied:
+            nil
+        case .idle:
+            isEnabled ? "Starting…" : nil
+        case .stalled:
+            "Reconnecting to the display…"
         case .noDisplay:
-            Text("No built-in display found. Auto Brightness only adjusts the built-in panel.")
-                .font(.caption)
-                .foregroundStyle(.orange)
+            "This display isn't available for capture."
         case .failed(let message):
-            Text("Capture failed: \(message)").font(.caption).foregroundStyle(.orange)
+            "Capture failed: \(message)"
         }
     }
 }

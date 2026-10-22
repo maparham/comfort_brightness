@@ -14,15 +14,17 @@ private typealias CDSet = @convention(c) (CGDirectDisplayID, Double) -> Void
 /// linked, so a future macOS that removes them yields `canControl == false`
 /// instead of a launch failure.
 ///
-/// Resolution is re-done whenever the built-in panel we are talking to changes,
-/// and never happens at all while there is no built-in panel. Probing a display
-/// that is not the one we will drive gives the wrong answer: launched in
-/// clamshell mode with an external monitor as main, a one-time probe asked the
-/// external whether its brightness could be changed, was told no, and disabled
-/// every code path for the rest of the process — opening the lid could not
-/// recover it.
+/// Each instance drives exactly one display for its whole life. An earlier
+/// version fell back to the built-in panel whenever its display was not
+/// built-in; with one instance per display, that fallback would have a Studio
+/// Display's unit driving the laptop panel, with two coordinators fighting
+/// over it. While its display is not active, `canControl` is false.
+///
+/// Symbols are resolved lazily against that display, never at launch against
+/// whatever happens to be main: probing the wrong display gets the wrong
+/// answer from `DisplayServicesCanChangeBrightness`.
 public final class DisplayServicesBrightness: BrightnessControlling {
-    private var cachedDisplayID: CGDirectDisplayID?
+    private let boundDisplayID: CGDirectDisplayID
     private var dsGet: DSGet?
     private var dsSet: DSSet?
     private var cdGet: CDGet?
@@ -31,32 +33,13 @@ public final class DisplayServicesBrightness: BrightnessControlling {
     /// been resolved yet.
     private var resolvedForDisplayID: CGDirectDisplayID?
 
-    /// The built-in panel, or nil when there isn't one — no built-in display at
-    /// all, or a laptop closed in clamshell mode. The spec is explicit that
-    /// external monitors are never touched, so "no built-in" means "do nothing",
-    /// not "fall back to whatever display is primary".
-    public static func builtinDisplayID() -> CGDirectDisplayID? {
-        var count: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return nil }
-        return ids.prefix(Int(count)).first { CGDisplayIsBuiltin($0) != 0 }
-    }
-
-    /// Re-resolved rather than captured once: a display can come and go while the
-    /// app runs (clamshell open/close, undocking), and the ID is not stable.
+    /// The bound display while it is active, else nil.
     private var displayID: CGDirectDisplayID? {
-        if let cachedDisplayID,
-           CGDisplayIsActive(cachedDisplayID) != 0,
-           CGDisplayIsBuiltin(cachedDisplayID) != 0 {
-            return cachedDisplayID
-        }
-        cachedDisplayID = Self.builtinDisplayID()
-        return cachedDisplayID
+        CGDisplayIsActive(boundDisplayID) != 0 ? boundDisplayID : nil
     }
 
-    public init(displayID: CGDirectDisplayID? = DisplayServicesBrightness.builtinDisplayID()) {
-        self.cachedDisplayID = displayID
+    public init(displayID: CGDirectDisplayID) {
+        boundDisplayID = displayID
     }
 
     /// Resolves the private symbols against the panel we are actually going to

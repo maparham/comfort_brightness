@@ -18,7 +18,7 @@ public enum SamplerStatus: Equatable {
     case failed(String)
 }
 
-/// Captures the built-in display at 2 fps, downscaled to a thumbnail, and hands
+/// Captures one display at 2 fps, downscaled to a thumbnail, and hands
 /// each frame to the analyzer.
 ///
 /// The capture size is tiny on purpose: the compositor does the downscale on the
@@ -53,6 +53,7 @@ public final class ScreenSampler: NSObject {
     private let outputQueue = DispatchQueue(label: "com.mahmoudparham.autobrightness.capture")
     private let onFrame: @MainActor (Frame) -> Void
     private let onStatus: @MainActor (SamplerStatus) -> Void
+    private let displayID: CGDirectDisplayID
 
     /// The caller's intent. Everything that restarts the stream is gated on this,
     /// so a stream stopped because the user disabled or paused the app is never
@@ -74,9 +75,11 @@ public final class ScreenSampler: NSObject {
     }
 
     public init(
+        displayID: CGDirectDisplayID,
         onFrame: @escaping @MainActor (Frame) -> Void,
         onStatus: @escaping @MainActor (SamplerStatus) -> Void
     ) {
+        self.displayID = displayID
         self.onFrame = onFrame
         self.onStatus = onStatus
         super.init()
@@ -139,12 +142,10 @@ public final class ScreenSampler: NSObject {
             // a user toggling the app off gets no capture, not a stream that
             // opens a moment later with nobody watching it.
             guard shouldBeRunning else { return }
-            // Built-in only, as specified. Measuring an external monitor's content
-            // and aiming the offset at the built-in panel — or worse, at the
-            // external's backlight — is not what this app promises to do.
-            guard let display = content.displays.first(where: {
-                CGDisplayIsBuiltin($0.displayID) != 0
-            }) else {
+            // The one display this sampler serves. ScreenCaptureKit not
+            // offering it (mirrored, or gone mid-reconfiguration) is reported
+            // rather than quietly measuring a different display.
+            guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
                 status = .noDisplay
                 return
             }
