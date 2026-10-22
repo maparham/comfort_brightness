@@ -1,7 +1,7 @@
 # External Displays — Design
 
 Date: 2026-10-22
-Status: draft
+Status: draft (revised after review)
 
 ## Problem
 
@@ -33,7 +33,9 @@ current connection):
 - Lid open, both displays: each follows its own content; dark content on one
   does not move the other.
 - Pressing the P24h-30's own brightness buttons is followed (the baseline
-  moves to the new level) within about a second, not fought.
+  moves to the new level), not fought, whether or not the app is adjusting
+  at that moment. Typically within about a second; at most
+  `refreshInterval` plus `settleWindow` plus one tick.
 - Quitting returns each display to its baseline.
 
 ## Non-Goals
@@ -65,8 +67,9 @@ Probed read-only on the development machine before writing this spec:
   The framebuffer node name (`dispext0`) links the two.
 
 No DDC *write* has been made yet. Write behaviour (latency, minimum spacing,
-whether read-back reflects a write at once) is verified in the first
-implementation task, before anything depends on it.
+whether read-back reflects a write at once) is measured in the first
+implementation task, with the pass/fail criteria under Testing, before
+anything depends on it.
 
 ## Architecture
 
@@ -77,16 +80,20 @@ AppModel                      global state: enabled, manual pause, system sleep,
      └─ DisplayUnit [P24h-30]   ScreenSampler(id) → Coordinator → RampingBrightness(4 × 0.1 s)   → DDCBrightness(transport)
 ```
 
-`Coordinator`, `Controller`, `LuminanceAnalyzer`, `Letterbox` and
-`BrightnessRamp` are unchanged. All DDC-specific behaviour is kept below the
-`BrightnessControlling` protocol, so the coordinator keeps the read-back
-semantics it was tuned for (see "Read-back contract").
+`Controller`, `LuminanceAnalyzer`, `Letterbox` and `BrightnessRamp` are
+unchanged. `Coordinator` changes in exactly one way: its external-change
+threshold comes from the backend (see "Read-back contract"). Everything else
+DDC-specific is kept below the `BrightnessControlling` protocol, so the
+coordinator keeps the read-back semantics it was tuned for.
 
 ### DisplayManager (App)
 
 Owns a dictionary of `DisplayUnit`s keyed by `CGDirectDisplayID`. macOS
-derives this ID from the display's vendor, model and serial, so it is stable
-across a reconnect of the same monitor on the same port.
+derives this ID from the display's vendor, model and serial, so it is usually
+stable across a reconnect of the same monitor. This has not been verified
+for a monitor whose serial is 0, or after moving it to another port. If the
+ID does change, the unit is torn down and recreated and its learned state is
+lost. That is accepted.
 
 Reconciles on launch and on every
 `NSApplication.didChangeScreenParametersNotification`:
@@ -94,11 +101,29 @@ Reconciles on launch and on every
 1. List active displays (`CGGetActiveDisplayList`).
 2. For each display that has gone away: stop its unit's sampler, call
    `restoreBaseline()` (the write is skipped if the backend can no longer
-   control the display), flush its ramp, and drop it.
+   control the display), flush its ramp, call the backend's `invalidate()`,
+   and drop the unit. `invalidate()` stops the DDC refresh timer, empties the
+   DDC queue, and clears `onControlChange`, so nothing calls back into a
+   dropped unit.
 3. For each new display: resolve a backend (below). The unit is created with
    that backend, or as *not adjustable* with a reason.
 4. Displays already present keep their unit and its learned state. The unit's
-   sampler restarts itself on reconfiguration, as it does today.
+   sampler restarts itself on reconfiguration, as it does today. For a DDC
+   unit, the `IOAVService` is re-matched and handed to the existing backend
+   with `replaceTransport(_:)`, because DCP services can be recreated across
+   sleep, wake and reconfiguration, and an old handle is dead. A DDC unit
+   whose backend is not responding is also re-matched on system wake
+   (`PauseMonitor`'s resume).
+
+Each reconcile pass takes a new generation number. A DDC probe started by an
+earlier pass, or for a display that has since gone, finishes without creating
+or changing a unit.
+
+A display left *not adjustable* because it "didn't respond to DDC" is
+re-probed with backoff (5 s, 10 s, 20 s, then every 60 s) and on system wake.
+A monitor that is still waking up at login is therefore picked up without
+waiting for a reconfiguration. The other not-adjustable reasons are
+structural and wait for the next reconfiguration.
 
 Backend resolution, in order:
 
@@ -108,6 +133,8 @@ Backend resolution, in order:
 2. **DDC**, if the display is not built-in, an `IOAVService` matches it (see
    matching), and one brightness read succeeds. The read happens on the DDC
    queue; until it returns, the unit shows "Checking…" and is not started.
+   The probe's reply seeds the backend's state, so the coordinator's first
+   `read()` already returns the real level rather than nil.
 3. Otherwise **not adjustable**, with one of: "No DDC connection",
    "Can't tell which connection is this display", "Didn't respond to DDC".
 
@@ -124,8 +151,14 @@ One display's pipeline: a `ScreenSampler`, a `Coordinator`, a
 `AppModel.applyRunState()` keeps its role as the single decision point. It
 computes `userWantsIt` as today and hands it to every unit. Each unit then
 applies the same rules `applyRunState` applies now, to its own sampler and
-coordinator: sample only while wanted and controllable, and run the
-coordinator only while wanted and its sampler is `.running`.
+coordinator: sample only while wanted, controllable and responding, and run
+the coordinator only while wanted, responding, and its sampler is `.running`.
+For DisplayServices backends, "responding" is always true.
+
+Everything `AppModel` currently sends to its single coordinator goes to every
+unit instead, including units created later: `isEnabled`, the three tuning
+settings (each `didSet` fans out, and a new unit starts from the current
+values), `retrySampling` (every sampler retries), and restore on termination.
 
 ### ScreenSampler (App)
 
@@ -137,78 +170,174 @@ all displays.
 
 ### DisplayServicesBrightness (App)
 
-Takes a display ID instead of searching for the built-in panel. The
-re-resolution logic, its `CanChangeBrightness` gate and the CoreDisplay
-fallback are unchanged. The fallback stays restricted to displays where
-`CanChangeBrightness` did not say no.
+Bound to exactly one display ID for its whole life. The current getter falls
+back to `builtinDisplayID()` whenever its cached ID is not built-in
+(`DisplayServicesBrightness.swift:49-55`). Under this design that fallback
+would make a Studio Display's unit drive the built-in panel, with two
+coordinators fighting over it, so it is removed. While its display is not
+active, `canControl` is false and reads return nil. Symbol resolution, the
+`CanChangeBrightness` gate and the CoreDisplay fallback are unchanged, and the
+fallback stays restricted to displays where `CanChangeBrightness` did not say
+no. A different built-in ID after a lid cycle simply produces a new unit.
 
 ### DDCBrightness (Core)
 
 Implements `BrightnessControlling` over a transport protocol:
 
 ```swift
-public protocol DDCTransport: AnyObject {
+public protocol DDCTransport: AnyObject, Sendable {
     /// Blocking. Current and maximum of VCP 0x10, or nil on any failure.
     func readBrightness() -> (current: Int, maximum: Int)?
-    /// Blocking. True when the write was accepted.
+    /// Blocking. True when the monitor acknowledged the write.
     func writeBrightness(_ value: Int) -> Bool
 }
 ```
 
-All transport calls run on one serial `DispatchQueue` owned by the backend.
-The main thread never waits on DDC, except in `flush()`.
+The real transport (`IOAVServiceTransport`, App) wraps one `IOAVService`
+handle. `replaceTransport(_:)` swaps it when the manager re-matches.
 
-- **`read()`** returns a cached value immediately (see "Read-back contract").
-- **`write(v)`** records `v` as the requested level, updates the cache, and
-  schedules a transport write of `round(v × maximum)`. Writes coalesce: if one
-  is already queued, its value is replaced instead of a second being queued.
-  The write is skipped if the integer equals the last integer sent. After each
-  transport write the queue waits 50 ms (DDC's required spacing) before
-  issuing anything else.
-- **Refresh:** a repeating 1 s timer queues a transport read. A read result is
-  discarded if any write was requested after the read was queued, or within
-  300 ms after the last transport write completed. That covers monitors that
-  briefly report the old level. Otherwise it updates the cache on the main
-  queue. Consequence, accepted: while the app is actively adjusting this
-  display, refreshes keep being discarded, so a button press on the monitor
-  is only noticed after the adjustment settles. A press usually comes after
-  the scene changes, so this costs about a second at most.
-- **`canControl`** is true until 5 consecutive transport failures (reads or
-  writes). After that it is false until the next successful refresh read,
-  which keeps being attempted at the same 1 s cadence. Asleep or unplugged
-  monitors therefore stop being driven and recover by themselves. Every
-  change of `canControl` is reported through an `onControlChange` closure.
-  The owning `DisplayUnit` re-applies its run state on it, because a unit
-  whose sampler was stopped for lack of control has nothing else that would
-  restart it.
-- **`maximum`** comes from each read reply and is never assumed to be 100. A
-  reply with maximum 0 counts as a failure.
-- **`flush()`** waits synchronously, with a 0.5 s timeout, for queued writes to
-  reach the monitor. It is used only on the termination path.
+#### Who owns what
 
-`DDCBrightness` lives in Core so it can be tested against a fake transport. A
-queue abstraction lets tests execute queued work inline and advance the
-refresh timer by hand.
+`DDCBrightness` is `@unchecked Sendable`. Its state is split by owner, and
+nothing is touched from the other side:
+
+- **Main thread:** `requested` (the last value `write` was given),
+  `observation` (the latest *external* reading posted by the queue, tagged
+  with the generation of the request it was compared against), `canControl`,
+  `isResponding`, and the request generation counter. `read()`, `write()`,
+  `canControl`, `isResponding` and the closures run here.
+- **DDC queue:** `lastKnownInt` (the monitor's level as last *established*,
+  either by an acknowledged send or by a read), `maximum`, `pendingInt` (the
+  one coalesced write not yet sent), the time of the last acknowledged send,
+  the time of the last read, and the consecutive-failure count.
+
+The queue posts results to main with `DispatchQueue.main.async`. It never
+uses `DispatchQueue.main.sync`, so `flush()` (a `sync` from main onto the
+queue) cannot deadlock. Time comes from an injected `Clock` and queue work from
+an injected executor, so tests run everything inline and can advance time.
+
+#### Writing
+
+`write(v)` sets `requested = v`, increments the request generation, clears
+`observation`, and enqueues `target = round(v × maximum)`. On the queue:
+
+- If `target == lastKnownInt` and nothing is pending, nothing is sent. The
+  comparison is with the monitor's last *known* level, not the last value
+  sent, so a level established by a read is never mistaken for one already
+  written.
+- Otherwise `pendingInt = target`, replacing any value still waiting. Only
+  one write is ever outstanding.
+- The sender sends `pendingInt`, then waits `ddcSpacing` (50 ms) before the
+  queue issues anything else. On acknowledgement, `lastKnownInt = pendingInt`
+  and `pendingInt` is cleared. On failure, `lastKnownInt` is left alone,
+  `pendingInt` is kept and retried after the spacing, and the failure counts
+  toward the limit below. A write that never lands is therefore never
+  reported as having moved the monitor.
+
+#### Reading
+
+A refresh read is due every `refreshInterval` (1 s). It is never skipped
+because of writes. That was the flaw in the previous draft: while content was
+changing, every read was thrown away and a button press was overwritten by
+the next absolute write. Instead:
+
+- **Quiet barrier.** When a read is due and the last acknowledged send was
+  less than `settleWindow` ago, the queue holds back further sends until the
+  window has passed. Writes requested meanwhile coalesce into `pendingInt`.
+  It then reads before it sends anything. During active adjustment this
+  pauses the glide for at most `settleWindow` plus one read (about 0.4 s)
+  once per second. The coordinator is not affected: it only sees `requested`.
+- **Comparing.** A reply equal to `lastKnownInt` means nothing changed. A
+  different reply is an external change: `lastKnownInt = reply`,
+  `pendingInt` is dropped (it was computed before the user acted and would
+  overwrite them), and the reply is posted to main as an observation.
+- On main, an observation is applied only if its generation is still the
+  current request generation. Otherwise a newer `write` has already
+  superseded it, and since the dropped pending write never reached the
+  monitor, the next refresh will see the user's level again.
+
+`settleWindow` starts at 300 ms. It becomes a named constant set from the
+measurement in the first implementation task.
+
+#### `read()`
+
+- Before the probe has seeded it: nil.
+- With no observation: `requested` (or, before any write, the probe's level
+  `current / maximum`).
+- With an observation `obs` for the current generation:
+  `requested + (obs − round(requested × maximum)) / maximum`. An external
+  change is therefore reported as a whole number of the monitor's steps away
+  from what was asked for. It never carries the rounding of the request
+  itself, so a one-step press always reads as exactly one step.
+
+#### Failure, recovery and writability
+
+- **`isResponding`** goes false after 5 consecutive transport failures
+  (reads or writes) and true again on the next successful read. Refresh
+  reads continue at the same cadence while it is false. Transitions are
+  reported through `onControlChange` (a `@MainActor` closure), and the unit
+  suspends or resumes its coordinator on them.
+- **`canControl`** goes false only for reasons that persist: transport
+  invalidated, maximum 0, or the monitor is found not to accept writes (next
+  item). A transient dropout leaves `canControl` true. That is what lets
+  `Coordinator.restoreBaseline()` queue its restore write while the monitor
+  is asleep (`Coordinator.swift:404` skips the write when `canControl` is
+  false). The restore stays as `pendingInt`, and on recovery it is sent
+  *before* the first read is reported. When the coordinator resumes, it reads
+  back the restored baseline rather than a level that still carries the old
+  offset.
+- **Writability check.** If 3 acknowledged sends in a row are each followed
+  by a read showing the level from before that send, the monitor is
+  acknowledging writes without applying them. `canControl` becomes false
+  with the reason "Doesn't accept brightness changes", and it stays that way
+  until the next reconfiguration.
+- **`maximum`** comes from every successful read and is never assumed to be
+  100. A reply with maximum 0 is a failure.
+
+#### Lifecycle
+
+- **`flush()`** runs `sync` on the queue with a 0.5 s timeout. It sends
+  `pendingInt` if there is one, ignoring the quiet barrier. Termination only.
+- **`invalidate()`** stops the refresh timer, drops pending work, clears the
+  closures, and makes `canControl` false. It is called when a unit is
+  dropped.
+- The refresh timer runs on the DDC queue (a `DispatchSourceTimer`), not on
+  the main run loop, so menu tracking cannot stall it.
+
+`DDCBrightness` lives in Core so it can be tested against a fake transport,
+a fake clock and an inline executor.
 
 ### Read-back contract
 
-`Coordinator` treats `read() − lastWritten` as external movement, with a
-0.01 threshold, a 0.002 minimum write and a bias probe that assumes read-back
-is exact. A DDC monitor only stores whole steps (1/100 here), so a raw
-read-back carries up to ±half a step of rounding. Summed over ticks, that
-would look like a slow external drift.
+`Coordinator` treats `read() − lastWritten` as external movement. It ignores
+movement below an external-change threshold, skips writes below 0.002, and
+runs a bias probe that assumes read-back is exact. On DDC:
 
-`DDCBrightness.read()` therefore reports the **requested** level whenever the
-monitor's integer equals `round(requested × maximum)`, and reports
-`current / maximum` only when they differ. To the coordinator, its own writes
-read back exactly, as on DisplayServices, and any change made with the
-monitor's buttons appears as real movement. A one-step button press shows up
-as at most 0.01 and accumulates across ticks under the existing logic. Moves of
-two steps or more are seen on the next refresh. No coordinator constant
-changes.
+- **Own writes read back exactly.** `read()` returns `requested` until there
+  is an observation, so the rounding of the request never appears as drift
+  and the bias probe is never triggered.
+- **External changes read back as whole steps** (see `read()` above), never
+  as fractions.
+- **The threshold comes from the backend.** `BrightnessControlling` gains
+  `var externalChangeThreshold: Double { get }`. A protocol extension
+  defaults it to 0.01, which keeps DisplayServices and `FakeBrightness`
+  exactly as they are today. `DDCBrightness` returns half a step,
+  `0.5 / maximum` (0.005 on the P24h-30). `RampingBrightness` forwards it.
+  `Coordinator` uses `brightness.externalChangeThreshold` in place of the
+  static `externalChangeThreshold`. This is the only `Coordinator` change.
 
-Before the first read completes, `read()` returns nil, and the coordinator
-already handles that.
+Under the old 0.01 threshold, a one-step press was followed or missed
+depending on rounding. A press reading −0.007 sat below the threshold
+indefinitely, because with no writes later ticks measure zero movement
+(`Coordinator.swift:167-170`). The next content-driven write then undid it.
+With whole-step reporting and a half-step threshold, every press of one step
+or more is followed on the tick after the refresh that sees it. A monitor
+whose maximum is above 100 is covered by the same rule.
+
+`deliberateChangeThreshold` (0.03) and `minimumWriteDelta` (0.002) are left
+alone. One or two button steps move the baseline without re-teaching the
+neutral, and three or more re-teach it, as a brightness-key press does on the
+built-in panel.
 
 ### RampingBrightness for DDC
 
@@ -220,19 +349,23 @@ is always the target, and the newest value always wins.
 ### Matching an IOAVService to a display (App, pure part in Core)
 
 1. For each active non-built-in display, read `IODisplayLocation` from
-   `CoreDisplay_DisplayCreateInfoDictionary`. Take its framebuffer node name:
-   the path component before `/AppleCLCD2` or `/IOMobileFramebufferShim`, up
-   to the `@` (for example `dispext0`).
-2. For each `DCPAVServiceProxy` with `Location == "External"`, read its
-   service-plane path and find the component that starts with
-   `<node>:dcpav-service`.
+   `CoreDisplay_DisplayCreateInfoDictionary`. Split the path on `/` and take
+   the component just before the last one (here `dispext0@70000000`). Its
+   framebuffer node name is the part before `@` (`dispext0`). The last
+   component itself is not inspected: `AppleCLCD2` is what this machine
+   shows, and other names are possible.
+2. For each `DCPAVServiceProxy` with `Location == "External"`, split its
+   service-plane path on `/` and find the components that start with
+   `<node>:` and contain `dcpav-service`.
 3. A display matches a service when exactly one service carries its node name.
    Zero matches means "No DDC connection". More than one, or a node claimed by
    two displays, means "Can't tell which connection is this display", and that
    display is not driven.
 
-Step 3's string logic is a pure function in Core (`AVServiceMatcher`), tested
-on real and synthetic paths. The IORegistry walk and the CoreDisplay call stay
+Steps 1–3 work purely on strings, without regular expressions, in a Core
+function (`AVServiceMatcher`). It is tested on the real paths recorded above
+and on a synthetic two-monitor set (`dispext0` and `dispext1`, as a dock with
+two outputs would produce). The IORegistry walk and the CoreDisplay call stay
 in App.
 
 If `CoreDisplay_DisplayCreateInfoDictionary` or any `IOAVService` symbol is
@@ -242,9 +375,10 @@ DisplayServices alone.
 ## UI
 
 - The popover's single brightness row becomes one row per display: name, a
-  percentage (or "Not adjustable — <reason>" / "Checking…"), and that unit's
-  sampler status where it is not `.running`. The "Pause for 1 hour" control
-  stays a single global control below the rows.
+  percentage (or "Not adjustable — <reason>" / "Checking…" / "Not
+  responding"), and that unit's sampler status where it is not `.running`.
+  The "Pause for 1 hour" control stays a single global control below the
+  rows.
 - "Screen Recording permission is required." is shown once, not per display.
 - The "unavailable on this system" warning is replaced by "No adjustable
   displays", shown only when there are zero adjustable units.
@@ -256,40 +390,78 @@ DisplayServices alone.
 
 ## Termination
 
-`restoreBaselineOnce()` restores and flushes every unit:
-`coordinator.restoreBaseline()`, then the ramp's `flush()`, then for DDC
-`DDCBrightness.flush()`. Total worst case is bounded by one 0.5 s timeout per
-DDC display.
+`restoreBaselineOnce()` runs `coordinator.restoreBaseline()` and then the
+ramp's `flush()` for every unit. It then calls `DDCBrightness.flush()` for
+all DDC units at once, waiting on them as a group. Total worst case is one
+0.5 s timeout, whatever the number of DDC displays.
 
 ## Error handling summary
 
 | Situation | Behaviour |
 |---|---|
 | DDC symbols missing (future macOS) | DDC off for all displays; DisplayServices displays unaffected |
-| Monitor doesn't answer the probe read | "Didn't respond to DDC"; re-probed on the next display reconfiguration |
-| Monitor stops answering mid-session (asleep, DDC switched off) | `canControl` false after 5 failures; unit's coordinator suspends; recovers on a successful read |
+| Monitor doesn't answer the probe read | "Didn't respond to DDC"; re-probed with backoff and on wake |
+| Monitor stops answering mid-session (asleep, DDC switched off) | `isResponding` false after 5 failures; coordinator suspends, restore queued as pending; on recovery the restore is sent first, then the coordinator resumes |
+| Write acknowledged but not applied, 3 times in a row | `canControl` false, "Doesn't accept brightness changes", until reconfiguration |
+| Stale IOAVService handle after sleep/reconfiguration | Re-matched on reconfiguration, and on wake while not responding; `replaceTransport` |
 | Ambiguous match | Not driven, with reason |
-| Display unplugged mid-ramp | Unit's sampler stopped, restore skipped (no control), unit dropped |
+| Display unplugged mid-ramp | Unit's sampler stopped, restore skipped (no control), backend invalidated, unit dropped |
 | Lid opened/closed | Built-in unit added/removed by reconciliation; externals untouched |
+| `CGDirectDisplayID` changes for the same monitor | Treated as a new display; learned state lost |
 
 ## Testing
 
-Core, via `swift test`:
+Core, via `swift test`, using a fake transport, a fake clock and an inline
+executor:
 
-- `DDCBrightness` against a fake transport: own writes read back exactly;
-  integer rounding is invisible; a different integer reads as movement;
-  coalescing keeps only the newest value; equal integers are not re-sent; a
-  read queued before a write is discarded; a read inside the 300 ms settle
-  window is discarded; 5 failures drop `canControl` and one good read
-  restores it; a maximum other than 100 scales correctly; maximum 0 is a
-  failure.
-- `Coordinator` + `RampingBrightness(4 × 0.1)` + `DDCBrightness` with a fake
-  transport: steady content writes nothing to the transport after settling;
-  a 5-step change on the fake monitor's "buttons" is followed and
-  re-neutralises; a 1-step change is eventually followed and is never fought.
-- `AVServiceMatcher`: the real paths recorded above match; zero, duplicate
-  and cross-claimed nodes yield the right outcome.
-- Existing tests unchanged and passing.
+- `DDCBrightness`:
+  - Own writes read back exactly, and the rounding of a request never
+    appears.
+  - A one-step external change reads as exactly one step from `requested`,
+    in both directions, from requests that round up and that round down.
+  - A maximum other than 100 scales correctly, and maximum 0 is a failure.
+  - Coalescing: only the newest pending value is sent. A target equal to
+    `lastKnownInt` is not sent, including when `lastKnownInt` was set by a
+    read rather than a send.
+  - A failed write leaves `lastKnownInt` unchanged, is retried, and is never
+    reported as movement.
+  - Quiet barrier: with a write requested every 100 ms, a read still runs at
+    least once per `refreshInterval`, and only after `settleWindow` without a
+    send.
+  - An external change drops the pending write. An observation from a
+    superseded generation is ignored.
+  - 5 failures make `isResponding` false and one good read restores it. A
+    restore requested while not responding is sent before the first read on
+    recovery.
+  - 3 acknowledged-but-unapplied writes make `canControl` false.
+  - `invalidate()` stops callbacks. `flush()` sends pending work, ignoring
+    the barrier, and respects its timeout.
+- `Coordinator` + `RampingBrightness(4 × 0.1)` + `DDCBrightness`, driven tick
+  by tick:
+  - Steady content sends nothing after settling.
+  - During continuous content-driven writes, a 1-step and a 5-step press on
+    the fake monitor are each followed and never overwritten. The 5-step press
+    re-neutralises; the 1-step press moves the baseline only.
+  - In steady state, a one-step press from a request that rounded down
+    (0.497 → monitor 50 → user 49) is followed, which was the reviewer's
+    failing case.
+  - A dropout followed by recovery leaves the baseline where the user had
+    it, not where the offset left the monitor.
+- `Coordinator` with `FakeBrightness`: every existing test passes unchanged,
+  which confirms the 0.01 default.
+- `AVServiceMatcher`: the real paths match; the synthetic two-monitor set
+  matches each display to its own service; zero, duplicate and cross-claimed
+  nodes give the right outcome.
+
+App, first implementation task: before anything is built on it, measure DDC
+writes on the P24h-30. Write a level, then read it back at 0, 50, 100, 200,
+300 and 500 ms; repeat at 10 different levels; and record the shortest
+spacing between writes that the monitor still honours.
+- **Pass:** every write is acknowledged, and read-back matches within
+  500 ms. `settleWindow` is set to the largest observed delay plus 100 ms,
+  and `ddcSpacing` to the measured minimum, but no less than 50 ms.
+- **Fail:** if read-back never matches, the monitor ignores DDC writes over
+  this connection. Stop and report before building further.
 
 App, manual, on the development machine (recorded in the plan's final
 task):
@@ -297,10 +469,11 @@ task):
 - Lid closed, P24h-30 only: adjusts, no warning.
 - Lid open: both adjust independently, and the menu bar shows the main
   display.
-- Monitor buttons are followed.
+- Monitor buttons are followed, including during a playing video.
 - Quit returns both displays to their baselines.
 - Unplugging and replugging the monitor while running recovers without a
   relaunch.
+- Display sleep and wake: the monitor comes back at its baseline.
 
 ## Documentation
 
