@@ -9,6 +9,8 @@ public final class Coordinator {
     /// A hardware/last-write discrepancy above this is attributed to the user or
     /// the ambient sensor. Read-back was measured to be bit-exact, and the
     /// brightness keys step by 1/16, so this threshold is not close to either.
+    /// This is the default; a backend whose read-back is coarser supplies its
+    /// own through `BrightnessControlling.externalChangeThreshold`.
     static let externalChangeThreshold = 0.01
     /// Writes smaller than this are pointless; suppressing them keeps the app
     /// from touching the hardware 2x per second while nothing is happening.
@@ -234,7 +236,7 @@ public final class Coordinator {
                     biasTrustRemaining -= 1
                 }
 
-                if abs(externalMovement) > Self.externalChangeThreshold {
+                if abs(externalMovement) > brightness.externalChangeThreshold {
                     if let previous = lastMovement,
                        abs(movement) > Self.repeatedDiscrepancyTolerance,
                        abs(movement - previous) <= Self.repeatedDiscrepancyTolerance {

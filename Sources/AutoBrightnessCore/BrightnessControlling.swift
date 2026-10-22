@@ -6,6 +6,11 @@ public protocol BrightnessControlling: AnyObject {
     /// False when the underlying API could not be resolved — expected on a future
     /// macOS release that removes it. The app must degrade cleanly, not crash.
     var canControl: Bool { get }
+    /// The smallest unexplained movement the coordinator treats as someone
+    /// else moving the display. The built-in panel reads back exactly, so the
+    /// default sits well above noise; a DDC monitor only holds whole steps and
+    /// asks for half of one, so that a single button press is never lost.
+    var externalChangeThreshold: Double { get }
     func read() -> Double?
     func write(_ value: Double)
 }
@@ -35,4 +40,8 @@ public final class FakeBrightness: BrightnessControlling {
     public func externalChange(to newValue: Double) {
         value = min(max(newValue, 0.0), 1.0)
     }
+}
+
+public extension BrightnessControlling {
+    var externalChangeThreshold: Double { Coordinator.externalChangeThreshold }
 }

@@ -40,6 +40,7 @@ public final class RampingBrightness: BrightnessControlling, @unchecked Sendable
     }
 
     public var canControl: Bool { wrapped.canControl }
+    public var externalChangeThreshold: Double { wrapped.externalChangeThreshold }
 
     /// While a ramp is in flight the target — not the step the panel happens to
     /// be sitting on — is the truthful answer to "where is this panel". The
