@@ -22,7 +22,11 @@ public struct SettingsView: View {
                     HStack {
                         Label(other.name, systemImage: "display")
                         Spacer()
-                        Text(other.note)
+                        Text(
+                            other.note == DisplayManager.Note.checking
+                                ? other.note
+                                : "Not adjustable — \(other.note)"
+                        )
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

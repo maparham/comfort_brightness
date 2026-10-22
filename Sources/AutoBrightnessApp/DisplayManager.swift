@@ -144,7 +144,9 @@ final class DisplayManager {
     }
 
     private func retryProbe(_ id: CGDirectDisplayID) {
-        retries[id] = nil
+        // Cancelled, not just dropped: a wake can get here with a backoff
+        // still pending, and an orphaned one would run a second retry chain.
+        retries.removeValue(forKey: id)?.cancel()
         guard others.contains(where: { $0.id == id && $0.note == Note.noResponse }) else { return }
         let active = DisplayRegistry.activeDisplayIDs()
         guard active.contains(id) else { return }
