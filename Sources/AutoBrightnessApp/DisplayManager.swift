@@ -48,7 +48,11 @@ final class DisplayManager {
     /// The user's baseline on each display that left the list while driven.
     /// A departing unit's restore write cannot reach a display that is already
     /// gone, so the display keeps whatever offset it had; a fresh unit would
-    /// otherwise adopt that as the user's level. In memory only, by design.
+    /// otherwise adopt that as the user's level. Recorded only when an offset
+    /// was actually on the display: a unit that was not driving it (off,
+    /// paused, not responding) has a baseline that stopped following the user,
+    /// and writing it back would override a level they set meanwhile. In
+    /// memory only, by design.
     @ObservationIgnored private var departedBaselines: [CGDirectDisplayID: Double] = [:]
 
     func reconcile() {
@@ -219,7 +223,7 @@ final class DisplayManager {
     /// Drops a unit, remembering its baseline in case the display returns
     /// (see `departedBaselines`).
     private func retire(_ unit: DisplayUnit) {
-        departedBaselines[unit.displayID] = unit.currentBaseline
+        departedBaselines[unit.displayID] = abs(unit.currentOffset) > 0 ? unit.currentBaseline : nil
         rematches.removeValue(forKey: unit.displayID)?.cancel()
         rematchAttempts[unit.displayID] = nil
         unit.tearDown()

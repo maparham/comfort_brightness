@@ -101,6 +101,9 @@ final class DisplayUnit {
     /// The coordinator's baseline right now. `baseline` is only a snapshot
     /// for the UI, taken at the last readout.
     var currentBaseline: Double { coordinator.baseline }
+    /// The coordinator's offset right now; zero while it is not driving the
+    /// display. `offset` is the UI snapshot.
+    var currentOffset: Double { coordinator.appliedOffset }
 
     var settings: ControllerSettings {
         get { coordinator.settings }
