@@ -133,7 +133,11 @@ func dropoutAndRecovery() {
     #expect(monitor.writes.isEmpty)
     monitor.isOff = false
     monitor.press(to: 20)   // came back at a level of its own
-    link.advance(by: 1)
+    // The refresh read due at t=6.0 still finds the monitor off (isOff is
+    // only cleared here, after that read's time has already passed), so
+    // recovery happens at the next one, t=7.0. The glide back to the target
+    // needs time after that read to finish, hence 1.5 s rather than 1.
+    link.advance(by: 1.5)
     #expect(log.events == [.responding(false), .responding(true)])
     #expect(monitor.level == 70)
 }

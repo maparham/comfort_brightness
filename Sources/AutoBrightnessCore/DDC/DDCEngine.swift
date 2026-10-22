@@ -162,17 +162,11 @@ public final class DDCEngine {
             isResponding = true
             events.append(.responding(true))
             if let target {
-                // A restore queued while the monitor was away goes out first,
-                // in one send rather than a glide: whatever the monitor kept
-                // meanwhile is not the user's doing, so there is no reason to
-                // ease into the restore.
+                // A restore queued while the monitor was away goes out first.
+                // Whatever the monitor kept meanwhile is not the user's doing.
                 establish(reading.current)
                 isGlideChecked = true
-                if target == lastKnown {
-                    self.target = nil
-                } else {
-                    stride = abs(target - lastKnown)
-                }
+                aim(at: target)
                 return events
             }
         }
