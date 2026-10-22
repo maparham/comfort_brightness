@@ -19,6 +19,7 @@ private let get = unsafeBitCast(getSymbol, to: DSGet.self)
 private let set = unsafeBitCast(setSymbol, to: DSSet.self)
 let display = CGMainDisplayID()
 
+@MainActor
 func brightness() -> Double {
     var value: Float = 0
     _ = get(display, &value)
@@ -43,6 +44,7 @@ controller does when left alone, and only then holds the panel.
 """)
 
 /// Watches the panel for `seconds`, writing nothing.
+@MainActor
 func observe(seconds: Int, label: String) -> Double {
     print("\n--- \(label): \(seconds)s, read-only ---")
     var maximum = 0.0
