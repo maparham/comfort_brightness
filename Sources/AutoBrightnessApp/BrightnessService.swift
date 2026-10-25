@@ -39,14 +39,16 @@ enum BrightnessService {
     /// A polite terminate first, which is what cured it by hand. A daemon too
     /// wedged to act on that is force-killed two seconds later, by the process
     /// IDs taken up front, so the fresh daemon launchd has started in the
-    /// meantime is never touched.
+    /// meantime is never touched. Each ID is checked to still be
+    /// corebrightnessd first: a kill sent as root to a reused ID would land
+    /// on whatever process now holds it.
     ///
     /// The daemon runs as root, so this asks for an administrator password
     /// through the standard macOS dialog. Restarting it briefly resets Night
     /// Shift and the ambient-light curve, which is harmless.
     static func restart() async -> RestartOutcome {
         let script = """
-            do shell script "p=$(/usr/bin/pgrep -x corebrightnessd) || exit 3; /bin/kill $p; /bin/sleep 2; /bin/kill -9 $p 2>/dev/null; exit 0" \
+            do shell script "p=$(/usr/bin/pgrep -x corebrightnessd) || exit 3; /bin/kill $p; /bin/sleep 2; for i in $p; do /usr/bin/pgrep -x corebrightnessd | /usr/bin/grep -qx $i && /bin/kill -9 $i; done; exit 0" \
             with prompt "Auto Brightness wants to restart the macOS brightness service, which has stopped responding." \
             with administrator privileges
             """

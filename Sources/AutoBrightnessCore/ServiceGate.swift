@@ -47,6 +47,15 @@ public final class ServiceGate: @unchecked Sendable {
         let pending = Pending<T>()
         let done = DispatchSemaphore(value: 0)
         queue.async { [self] in
+            // A call its caller gave up on while it waited in the queue is
+            // stale: a brightness write would land long after it was wanted,
+            // over whatever the user has set since. Reaching it at all means
+            // the queue is moving again, which is the same news as a hung call
+            // returning, so it clears the gate just the same.
+            guard pending.start() else {
+                setStuck(false)
+                return
+            }
             let result = work()
             let wasAbandoned = pending.finish(with: result)
             done.signal()
@@ -81,6 +90,12 @@ private final class Pending<T: Sendable>: @unchecked Sendable {
     private var isAbandoned = false
 
     var result: T? { lock.withLock { value } }
+
+    /// Claims the call for running. Returns false if the caller had already
+    /// given up on it, in which case it must not run.
+    func start() -> Bool {
+        lock.withLock { !isAbandoned }
+    }
 
     /// Records the result. Returns true if the caller had already given up,
     /// in which case the gate was declared stuck on this call's account.

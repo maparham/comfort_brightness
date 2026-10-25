@@ -107,3 +107,33 @@ func gatePassesOptionalResult() {
     #expect(missing == .some(nil))
     #expect(!gate.isStuck)
 }
+
+@Test("A call given up on while queued behind a hung one never runs")
+func gateDropsAbandonedQueuedCall() {
+    let gate = ServiceGate(label: "test", timeout: 0.1)
+    let release = DispatchSemaphore(value: 0)
+    let hungStarted = DispatchSemaphore(value: 0)
+    let ran = Recorder<Bool>()
+    let queuedDone = DispatchSemaphore(value: 0)
+
+    // A hung call on one thread, and a second call made from another thread
+    // before the gate knows it is stuck, so it queues behind the first.
+    DispatchQueue.global().async {
+        _ = gate.call { hungStarted.signal(); release.wait(); return 0 }
+    }
+    hungStarted.wait()
+    DispatchQueue.global().async {
+        _ = gate.call { ran.append(true); return 1 }
+        queuedDone.signal()
+    }
+    queuedDone.wait()
+    #expect(gate.isStuck)
+
+    // The service comes back. The queued call is stale by now: a write
+    // would move the panel to a level nobody wants any more.
+    release.signal()
+    #expect(waitUntil { !gate.isStuck })
+    Thread.sleep(forTimeInterval: 0.05)
+    #expect(ran.values.isEmpty)
+    #expect(gate.call { 2 } == 2)
+}

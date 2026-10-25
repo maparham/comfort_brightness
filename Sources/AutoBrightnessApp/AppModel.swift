@@ -215,6 +215,7 @@ public final class AppModel {
             Task { @MainActor in self?.syncBrightnessServiceState() }
         }
         serviceNotifier.onOpen = { [weak self] in self?.onShowSettings?() }
+        serviceNotifier.start()
         BrightnessService.probe()
 
         let monitor = PauseMonitor(

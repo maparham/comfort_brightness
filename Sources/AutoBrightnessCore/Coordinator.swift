@@ -107,6 +107,11 @@ public final class Coordinator {
     /// reached for the keys, so bounding only the offset lets a level set under
     /// a full positive offset drift a full negative one away — twice the limit.
     private var userLevel: Double
+    /// True when an offset was on the panel at a restore that could not be
+    /// written, because the actuator was out of reach: the macOS brightness
+    /// service stuck, say. The panel is still sitting at baseline plus that
+    /// offset, and `resume()` would otherwise read it back as the user's level.
+    private var owesRestore = false
 
     public var settings: ControllerSettings
     public private(set) var baseline: Double
@@ -385,6 +390,12 @@ public final class Coordinator {
         // re-read below, so by now the window could only do harm: it would
         // deny the first deliberate keypress after waking its re-teaching.
         powerEventTicksRemaining = 0
+        // Settled before the re-read below, so it reads the user's level
+        // rather than an offset stranded on the panel while it was out of reach.
+        if owesRestore, brightness.canControl {
+            brightness.write(baseline)
+            owesRestore = false
+        }
         // `biasEstimate` deliberately survives: it describes the actuator, not
         // the session. Forgetting it would make the app re-learn — and re-absorb
         // — the same bias after every sleep/wake.
@@ -402,9 +413,15 @@ public final class Coordinator {
     public func restoreBaseline() {
         // Only the write is conditional. An actuator that has gone away — the
         // lid closed on a docked machine — is a reason not to touch hardware,
-        // never a reason to keep a stale offset and anchor on the books.
-        if brightness.canControl, lastWritten != nil {
-            brightness.write(baseline)
+        // never a reason to keep a stale offset and anchor on the books. The
+        // write it could not take is owed, and paid on `resume()`.
+        if lastWritten != nil || owesRestore {
+            if brightness.canControl {
+                brightness.write(baseline)
+                owesRestore = false
+            } else {
+                owesRestore = true
+            }
         }
         lastWritten = nil
         resetExternalTracking()

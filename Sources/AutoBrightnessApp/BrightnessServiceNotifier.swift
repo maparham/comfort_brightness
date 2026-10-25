@@ -10,6 +10,9 @@ final class BrightnessServiceNotifier: NSObject, UNUserNotificationCenterDelegat
     var onOpen: (() -> Void)?
 
     private var pendingPost: Task<Void, Never>?
+    /// The state last reported. Checked again after the permission prompt,
+    /// which can stay open long after the service has recovered.
+    private var isStuck = false
     private static let identifier = "brightness-service-stuck"
     /// The service is reported in the popover and the menu bar at once. The
     /// notification waits this long so that a daemon merely slow to answer
@@ -22,7 +25,17 @@ final class BrightnessServiceNotifier: NSObject, UNUserNotificationCenterDelegat
         Bundle.main.bundleURL.pathExtension == "app" ? .current() : nil
     }
 
+    /// Takes over clicks on notifications left from an earlier run, then
+    /// clears them: whatever they reported is not known to be true any more,
+    /// and this run reports again if it still is.
+    func start() {
+        guard let center else { return }
+        center.delegate = self
+        center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
+    }
+
     func update(isStuck: Bool) {
+        self.isStuck = isStuck
         pendingPost?.cancel()
         pendingPost = nil
         guard let center else { return }
@@ -39,10 +52,11 @@ final class BrightnessServiceNotifier: NSObject, UNUserNotificationCenterDelegat
 
     private func post() async {
         guard let center else { return }
-        center.delegate = self
         // Asked here rather than at launch: most people never see this
         // notification, and should not be asked to allow one they never get.
         guard (try? await center.requestAuthorization(options: [.alert])) == true else { return }
+        // The prompt may have sat open while the service recovered.
+        guard isStuck, !Task.isCancelled else { return }
         let content = UNMutableNotificationContent()
         content.title = "Brightness controls stopped working"
         content.body = "The macOS brightness service isn't responding. Click to restart it."

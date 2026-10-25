@@ -407,3 +407,53 @@ func unavailableDisplay() {
     }
     #expect(fake.writes.isEmpty)
 }
+
+/// An actuator that can go out of reach and come back, the way the built-in
+/// panel does while the macOS brightness service is stuck.
+private final class SwitchableBrightness: BrightnessControlling {
+    var value: Double
+    var canControl = true
+    private(set) var writes: [Double] = []
+    init(value: Double) { self.value = value }
+    func read() -> Double? { canControl ? value : nil }
+    func write(_ newValue: Double) {
+        guard canControl else { return }
+        value = newValue
+        writes.append(newValue)
+    }
+}
+
+@Test("A restore that could not be written is written once the panel is back")
+func owedRestoreIsPaidOnResume() {
+    let panel = SwitchableBrightness(value: 0.60)
+    let coordinator = Coordinator(brightness: panel, settings: .defaults)
+    for _ in 0..<20 { coordinator.tick(luminance: 0.95) }
+    let offsetLevel = panel.value
+    #expect(abs(offsetLevel - 0.60) > 0.01)
+
+    // The service stops answering while an offset is on the panel.
+    panel.canControl = false
+    coordinator.suspend()
+    #expect(panel.value == offsetLevel)
+
+    panel.canControl = true
+    coordinator.resume()
+
+    // The user's level comes back, rather than the stranded offset being
+    // adopted as their new baseline.
+    #expect(abs(panel.value - 0.60) < 1e-6)
+    #expect(abs(coordinator.baseline - 0.60) < 1e-6)
+}
+
+@Test("Nothing is owed when no offset was on the panel")
+func noRestoreOwedWithoutOffset() {
+    let panel = SwitchableBrightness(value: 0.60)
+    let coordinator = Coordinator(brightness: panel, settings: .defaults)
+    panel.canControl = false
+    coordinator.suspend()
+    panel.canControl = true
+    panel.value = 0.40
+    coordinator.resume()
+    #expect(panel.writes.isEmpty)
+    #expect(abs(coordinator.baseline - 0.40) < 1e-6)
+}
