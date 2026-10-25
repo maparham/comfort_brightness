@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = hosting
         self.popover = popover
 
+        model.onShowSettings = { [weak self] in self?.showSettings() }
         model.start()
     }
 
@@ -57,6 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows: Bool
     ) -> Bool {
+        showSettingsWindow()
+        return true
+    }
+
+    private func showSettingsWindow() {
         if settingsWindow == nil {
             let hosting = NSHostingController(rootView: SettingsView(model: model))
             hosting.sizingOptions = .preferredContentSize
@@ -72,7 +78,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate()
         settingsWindow?.makeKeyAndOrderFront(nil)
-        return true
+    }
+
+    /// Puts the settings on screen: the popover when the status item is
+    /// there to anchor it, the window when it is not.
+    private func showSettings() {
+        guard let popover, let button = statusItem?.button else {
+            showSettingsWindow()
+            return
+        }
+        guard !popover.isShown else { return }
+        NSApp.activate()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -116,16 +134,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Reaching the button means any retry chain has served its purpose.
         statusItemRetry?.cancel()
         statusItemRetry = nil
-        let (brightness, showsIcon) = withObservationTracking {
-            (model.menuBarBrightness, model.showsMenuBarIcon)
-        } onChange: {
-            Task { @MainActor [weak self] in
+        let (brightness, showsIcon, serviceStuck) = withObservationTracking {
+            (model.menuBarBrightness, model.showsMenuBarIcon, model.isBrightnessServiceStuck)
+        } onChange: { [weak self] in
+            Task { @MainActor in
                 self?.updateStatusItem()
             }
         }
         // The glyph is unconditional when there is no percentage: a status item
         // with neither image nor title collapses to nothing the user can click.
-        button.image = (showsIcon || brightness == nil) ? makeStatusGlyph() : nil
+        // A stuck brightness service overrides the icon setting: it is the
+        // one state worth putting in front of the user unasked.
+        if serviceStuck {
+            button.image = makeServiceStuckGlyph()
+        } else {
+            button.image = (showsIcon || brightness == nil) ? makeStatusGlyph() : nil
+        }
         button.title = brightness.map { "\(Int(($0 * 100).rounded()))%" } ?? ""
     }
 

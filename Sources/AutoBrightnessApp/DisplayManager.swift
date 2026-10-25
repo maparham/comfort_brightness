@@ -23,6 +23,7 @@ final class DisplayManager {
         static let unwritable = "Doesn't accept brightness changes"
         static let unavailable = "DDC isn't available on this Mac"
         static let fixed = "Brightness can't be changed"
+        static let serviceStuck = "macOS brightness service isn't responding"
     }
 
     /// Built-in first, then by display ID, so rows do not jump around.
@@ -138,7 +139,9 @@ final class DisplayManager {
             return
         }
         guard CGDisplayIsBuiltin(id) == 0 else {
-            setNote(id, name: name, Note.fixed)
+            // A stuck service cannot say whether the panel is adjustable, so
+            // this is not a verdict. `AppModel` reconciles once it recovers.
+            setNote(id, name: name, BrightnessService.gate.isStuck ? Note.serviceStuck : Note.fixed)
             return
         }
         switch ddc {

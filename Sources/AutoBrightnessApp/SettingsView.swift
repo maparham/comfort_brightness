@@ -16,7 +16,11 @@ public struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(model.units, id: \.displayID) { unit in
-                    DisplayRow(unit: unit, isEnabled: model.isEnabled)
+                    DisplayRow(
+                        unit: unit,
+                        isEnabled: model.isEnabled,
+                        isServiceStuck: model.isBrightnessServiceStuck && !unit.usesDDC
+                    )
                 }
                 ForEach(model.otherDisplays) { other in
                     HStack {
@@ -51,6 +55,10 @@ public struct SettingsView: View {
                 Label("No adjustable displays", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
+            }
+
+            if model.isBrightnessServiceStuck {
+                serviceNotice
             }
 
             if model.needsScreenRecordingPermission {
@@ -140,6 +148,30 @@ public struct SettingsView: View {
         return "Version \(short) (\(build))"
     }()
 
+    private var serviceNotice: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(
+                "The macOS brightness service has stopped responding.",
+                systemImage: "exclamationmark.triangle"
+            )
+            .foregroundStyle(.orange)
+            Text("Brightness keys and Control Center won't work either until it restarts. Restarting asks for an administrator password.")
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Restart Brightness Service", action: model.restartBrightnessService)
+                    .disabled(model.isRestartingBrightnessService)
+                if model.isRestartingBrightnessService {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            if let error = model.brightnessServiceError {
+                Text(error).foregroundStyle(.orange)
+            }
+        }
+        .font(.caption)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var permissionNotice: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label(
@@ -173,13 +205,16 @@ public struct SettingsView: View {
 private struct DisplayRow: View {
     let unit: DisplayUnit
     let isEnabled: Bool
+    /// True when this display is driven through the macOS brightness service
+    /// and that service is stuck. Explained once, in the notice below.
+    let isServiceStuck: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Label(unit.name, systemImage: unit.isBuiltin ? "laptopcomputer" : "display")
                 Spacer()
-                if !unit.isResponding {
+                if !unit.isResponding || isServiceStuck {
                     Text("Not responding")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -198,7 +233,10 @@ private struct DisplayRow: View {
     }
 
     private var statusNote: String? {
-        switch unit.status {
+        // Capture stops while the service is stuck, and "Starting…" would
+        // promise something that is not about to happen.
+        if isServiceStuck { return nil }
+        return switch unit.status {
         case .running, .permissionDenied:
             nil
         case .idle:

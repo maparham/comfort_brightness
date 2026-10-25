@@ -24,8 +24,14 @@ private typealias CDSet = @convention(c) (CGDirectDisplayID, Double) -> Void
 /// Symbols are resolved lazily against that display, never at launch against
 /// whatever happens to be main: probing the wrong display gets the wrong
 /// answer from `DisplayServicesCanChangeBrightness`.
+///
+/// Every call into the frameworks goes through `gate`, because behind them is
+/// a daemon that can stop answering without ever failing (see `ServiceGate`).
+/// While it is stuck the display is reported as not controllable, reads come
+/// back empty and writes are dropped, all without waiting.
 public final class DisplayServicesBrightness: BrightnessControlling {
     private let boundDisplayID: CGDirectDisplayID
+    private let gate: ServiceGate
     private var dsGet: DSGet?
     private var dsSet: DSSet?
     private var cdGet: CDGet?
@@ -39,9 +45,27 @@ public final class DisplayServicesBrightness: BrightnessControlling {
         CGDisplayIsActive(boundDisplayID) != 0 ? boundDisplayID : nil
     }
 
-    public init(displayID: CGDirectDisplayID) {
+    init(displayID: CGDirectDisplayID, gate: ServiceGate = BrightnessService.gate) {
         boundDisplayID = displayID
+        self.gate = gate
     }
+
+    /// Asks the daemon for the main display's brightness and throws the answer
+    /// away. The point is the asking: a stuck daemon trips `gate` here. Blocks
+    /// for up to the gate's timeout, so it belongs off the main thread.
+    static func probe(through gate: ServiceGate) {
+        guard let handle = dlopen(Self.displayServicesPath, RTLD_LAZY),
+              let symbol = dlsym(handle, "DisplayServicesGetBrightness") else { return }
+        let get = unsafeBitCast(symbol, to: DSGet.self)
+        let id = CGMainDisplayID()
+        _ = gate.call {
+            var value: Float = 0
+            return get(id, &value)
+        }
+    }
+
+    private static let displayServicesPath =
+        "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
 
     /// Resolves the private symbols against the panel we are actually going to
     /// drive, redoing the work if that panel has changed since last time. Cheap
@@ -49,12 +73,8 @@ public final class DisplayServicesBrightness: BrightnessControlling {
     /// framework is a lookup, and after the first call the guard exits at once.
     private func resolveSymbolsIfNeeded(for id: CGDirectDisplayID) {
         guard resolvedForDisplayID != id else { return }
-        resolvedForDisplayID = id
 
-        let displayServices = dlopen(
-            "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices",
-            RTLD_LAZY
-        )
+        let displayServices = dlopen(Self.displayServicesPath, RTLD_LAZY)
         func ds(_ name: String) -> UnsafeMutableRawPointer? {
             guard let handle = displayServices else { return nil }
             return dlsym(handle, name)
@@ -63,8 +83,18 @@ public final class DisplayServicesBrightness: BrightnessControlling {
         var canChange = true
         if let symbol = ds("DisplayServicesCanChangeBrightness") {
             let fn = unsafeBitCast(symbol, to: DSCan.self)
-            canChange = fn(id) != 0
+            guard let answer = gate.call({ fn(id) != 0 }) else {
+                // The daemon did not answer, which says nothing about the
+                // display. Settle nothing and ask again next time.
+                dsGet = nil
+                dsSet = nil
+                cdGet = nil
+                cdSet = nil
+                return
+            }
+            canChange = answer
         }
+        resolvedForDisplayID = id
 
         if canChange,
            let get = ds("DisplayServicesGetBrightness"),
@@ -105,20 +135,26 @@ public final class DisplayServicesBrightness: BrightnessControlling {
     }
 
     public var canControl: Bool {
-        guard controllableDisplayID != nil else { return false }
+        // Checked first so a stuck daemon is not asked anything, even the
+        // can-change question a fresh resolution would put to it.
+        guard !gate.isStuck, controllableDisplayID != nil else { return false }
         return (dsGet != nil && dsSet != nil) || (cdGet != nil && cdSet != nil)
     }
 
     public func read() -> Double? {
         guard let displayID = controllableDisplayID else { return nil }
         if let dsGet {
-            var value: Float = 0
-            if dsGet(displayID, &value) == 0 {
-                return Double(value)
+            let reading: Double?? = gate.call {
+                var value: Float = 0
+                return dsGet(displayID, &value) == 0 ? Double(value) : nil
             }
+            if case .some(.some(let value)) = reading { return value }
+            // Nothing from the fallback either while the daemon is stuck: it
+            // sits on the same daemon, and the gate would refuse it anyway.
+            if reading == nil { return nil }
         }
         if let cdGet {
-            return cdGet(displayID)
+            return gate.call { cdGet(displayID) }
         }
         return nil
     }
@@ -127,9 +163,11 @@ public final class DisplayServicesBrightness: BrightnessControlling {
         guard let displayID = controllableDisplayID else { return }
         let clamped = min(max(value, 0.0), 1.0)
         if let dsSet {
-            _ = dsSet(displayID, Float(clamped))
+            _ = gate.call { dsSet(displayID, Float(clamped)) }
             return
         }
-        cdSet?(displayID, clamped)
+        if let cdSet {
+            _ = gate.call { cdSet(displayID, clamped) }
+        }
     }
 }

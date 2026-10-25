@@ -44,3 +44,14 @@ func makeStatusGlyph() -> NSImage {
     image.accessibilityDescription = "Auto Brightness"
     return image
 }
+
+/// Shown in place of the usual glyph while the macOS brightness service is
+/// stuck, so the menu bar itself says something is wrong.
+@MainActor
+func makeServiceStuckGlyph() -> NSImage {
+    let description = "Auto Brightness: brightness service not responding"
+    let image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: description)
+        ?? makeStatusGlyph()
+    image.isTemplate = true
+    return image
+}

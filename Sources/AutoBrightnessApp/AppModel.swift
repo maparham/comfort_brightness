@@ -54,6 +54,15 @@ public final class AppModel {
     /// can say so rather than leave a switch showing a state that was never
     /// achieved.
     public private(set) var launchAtLoginError: String?
+    /// True while the macOS brightness service is not answering. Mirrors
+    /// `BrightnessService.gate` on the main actor, for the UI.
+    public private(set) var isBrightnessServiceStuck = false
+    public private(set) var isRestartingBrightnessService = false
+    /// Why the last restart did not help, shown until the service recovers.
+    public private(set) var brightnessServiceError: String?
+    /// Asks the app delegate to put the settings on screen.
+    @ObservationIgnored var onShowSettings: (() -> Void)?
+    @ObservationIgnored private let serviceNotifier = BrightnessServiceNotifier()
 
     var units: [DisplayUnit] { displays.units }
     var otherDisplays: [DisplayManager.OtherDisplay] { displays.others }
@@ -200,12 +209,22 @@ public final class AppModel {
     public func start() {
         displays.onUnitAdded = { [weak self] unit in self?.configure(unit) }
 
+        // Installed before anything first reaches the service, so a daemon
+        // already stuck at launch is reported like one that gets stuck later.
+        BrightnessService.gate.onStuckChange = { [weak self] _ in
+            Task { @MainActor in self?.syncBrightnessServiceState() }
+        }
+        serviceNotifier.onOpen = { [weak self] in self?.onShowSettings?() }
+        BrightnessService.probe()
+
         let monitor = PauseMonitor(
             onSuspend: { [weak self] in
                 self?.isSystemPaused = true
                 self?.applyRunState()
             },
             onResume: { [weak self] in
+                // Waking is when the daemon has been seen to get stuck.
+                BrightnessService.probe()
                 self?.isSystemPaused = false
                 self?.displays.noteWake()
                 self?.applyRunState()
@@ -243,6 +262,53 @@ public final class AppModel {
 
         displays.reconcile()
         applyRunState()
+    }
+
+    /// Takes the gate's state as it is now rather than as the notification
+    /// said it was. Notifications from different threads can reach the main
+    /// actor out of order, and the gate is the one source of truth.
+    private func syncBrightnessServiceState() {
+        let stuck = BrightnessService.gate.isStuck
+        guard stuck != isBrightnessServiceStuck else { return }
+        isBrightnessServiceStuck = stuck
+        serviceNotifier.update(isStuck: stuck)
+        if !stuck {
+            brightnessServiceError = nil
+            // A built-in panel that turned up while the service was stuck was
+            // noted as such rather than driven. Look at every display afresh.
+            displays.reconcile()
+        }
+        // Each display re-reads whether it can be controlled: units driven by
+        // the service stop adjusting while it is stuck, and resume after.
+        applyRunState()
+    }
+
+    /// Restarts the macOS brightness service, behind an administrator
+    /// password prompt. Recovery itself is noticed by the gate, when the call
+    /// it was waiting on fails along with the old daemon.
+    public func restartBrightnessService() {
+        guard !isRestartingBrightnessService else { return }
+        isRestartingBrightnessService = true
+        brightnessServiceError = nil
+        Task {
+            defer { isRestartingBrightnessService = false }
+            switch await BrightnessService.restart() {
+            case .restarted:
+                // Give launchd a moment to bring the new daemon up, then ask
+                // it something, in case it came up stuck as well.
+                try? await Task.sleep(for: .seconds(2))
+                BrightnessService.probe()
+                try? await Task.sleep(for: .seconds(2))
+                if BrightnessService.gate.isStuck {
+                    brightnessServiceError =
+                        "The brightness service still isn't responding. Restarting your Mac will clear it."
+                }
+            case .cancelled:
+                break
+            case .failed(let message):
+                brightnessServiceError = "Couldn't restart the brightness service: \(message)"
+            }
+        }
     }
 
     /// Re-attempts capture on every display, for the case where the user has
